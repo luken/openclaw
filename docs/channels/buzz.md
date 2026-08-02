@@ -204,12 +204,15 @@ openclaw message send \
   --message "Please review this, nostr:npub1..."
 ```
 
-The referenced public key must be a current member of the target room. Unknown
-names, duplicate profile names, and out-of-room public keys fail visibly instead
-of sending text that looks like a mention without notifying anyone. Ambiguous
+The referenced public key must be a current member of the target room. Without
+an explicit identity, unknown names and duplicate profile names fail visibly
+instead of sending text that looks like a mention without notifying anyone.
+When the message contains an explicit identity, unresolved or ambiguous labels
+remain presentation text; include every intended identity explicitly. Ambiguous
 errors list candidate public keys so the sender can retry with the intended
-`nostr:npub...` identity. Mention-like text inside inline or fenced Markdown
-code is ignored, and one message can carry at most 50 native mentions.
+`nostr:npub...` identity. Out-of-room public keys always fail. Mention-like text
+inside inline or fenced Markdown code is ignored, and one message can carry at
+most 50 native mentions.
 
 Connected Gateways resolve names from their existing in-memory directory
 snapshot and do not query the relay per message. Profiles beyond the bounded

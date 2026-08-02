@@ -9,7 +9,7 @@ describe("Buzz channel guidance", () => {
       "- Buzz targets: use a configured room UUID, `buzz:<ROOM_UUID>`, or a unique current room name. Use the UUID when room names are ambiguous.",
     );
     expect(hints).toContain(
-      "- Buzz mentions: write a unique current room member as `@Display Name`. For an explicit identity, include `nostr:npub...`; the public key must belong to the target room. Ambiguous, unknown, or out-of-room mentions fail instead of sending untagged mention text.",
+      "- Buzz mentions: write a unique current room member as `@Display Name`. For an explicit identity, include `nostr:npub...`; the public key must belong to the target room. Any unresolved or ambiguous label needs an explicit identity for every intended member.",
     );
     expect(buzzPlugin.messaging?.targetResolver?.hint).toBe("<room UUID|configured room name>");
   });

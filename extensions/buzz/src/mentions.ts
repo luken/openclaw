@@ -20,6 +20,10 @@ function isAsciiWhitespace(character: string | undefined): boolean {
   return character !== undefined && /^[\t-\r ]$/u.test(character);
 }
 
+function isOnlyAsciiWhitespace(value: string): boolean {
+  return /^[\t-\r ]*$/u.test(value);
+}
+
 function isMentionBoundary(value: string): boolean {
   const character = value[0];
   return character === undefined || isAsciiWhitespace(character) || ",;.!?:)]}".includes(character);
@@ -32,7 +36,7 @@ function stripCodeRegions(content: string): string {
     if (content.startsWith("```", index)) {
       const lineStart = content.lastIndexOf("\n", index - 1) + 1;
       const beforeFence = content.slice(lineStart, index);
-      if ([...beforeFence].every(isAsciiWhitespace)) {
+      if (isOnlyAsciiWhitespace(beforeFence)) {
         const openingLineEnd = content.indexOf("\n", index + 3);
         let searchFrom = openingLineEnd === -1 ? content.length : openingLineEnd + 1;
         let closeEnd = content.length;
@@ -43,7 +47,7 @@ function stripCodeRegions(content: string): string {
           }
           const closingLineStart = content.lastIndexOf("\n", closingFence - 1) + 1;
           const beforeClosingFence = content.slice(closingLineStart, closingFence);
-          if ([...beforeClosingFence].every(isAsciiWhitespace)) {
+          if (isOnlyAsciiWhitespace(beforeClosingFence)) {
             const closingLineEnd = content.indexOf("\n", closingFence + 3);
             closeEnd = closingLineEnd === -1 ? content.length : closingLineEnd + 1;
             break;
@@ -237,7 +241,7 @@ export function resolveBuzzMessageMentions(params: {
       .map((member) => member.displayName)
       .filter((name): name is string => Boolean(name)),
   );
-  if (hasAtMentionCandidate(stripped) && names.length === 0) {
+  if (hasAtMentionCandidate(stripped) && names.length === 0 && explicitPublicKeys.length === 0) {
     throw new Error(
       "Buzz mention does not match a current room member; use nostr:npub... for an explicit identity",
     );
@@ -245,12 +249,15 @@ export function resolveBuzzMessageMentions(params: {
   for (const name of names) {
     const matches = namesToPublicKeys.get(name) ?? [];
     if (matches.length === 0) {
+      if (explicitPublicKeys.length > 0) {
+        continue;
+      }
       throw new Error(
         `Buzz mention "@${name}" does not match a current room member; use nostr:npub... for an explicit identity`,
       );
     }
     if (matches.length > 1) {
-      if (matches.some((publicKey) => explicitPublicKeys.includes(publicKey))) {
+      if (explicitPublicKeys.length > 0) {
         continue;
       }
       const visibleCandidates = matches

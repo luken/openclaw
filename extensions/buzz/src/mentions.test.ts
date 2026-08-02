@@ -86,7 +86,7 @@ describe("Buzz outbound mentions", () => {
     ).toEqual([ALICE_PUBLIC_KEY]);
   });
 
-  it("requires explicit identities to resolve the named member they accompany", () => {
+  it("allows unresolved labels as presentation text when an explicit identity is present", () => {
     const explicitBob = nip19.npubEncode(BOB_PUBLIC_KEY);
     const roomMembers = members(
       { publicKey: ALICE_PUBLIC_KEY, displayName: "Alice" },
@@ -94,21 +94,21 @@ describe("Buzz outbound mentions", () => {
       { publicKey: BOB_PUBLIC_KEY, displayName: "Bob" },
     );
 
-    expect(() =>
+    expect(
       resolveBuzzMessageMentions({
         text: `Hello @Missing (nostr:${explicitBob})`,
         members: roomMembers,
         senderPublicKey: BOT_PUBLIC_KEY,
       }),
-    ).toThrow('Buzz mention "@missing" does not match a current room member');
+    ).toEqual([BOB_PUBLIC_KEY]);
 
-    expect(() =>
+    expect(
       resolveBuzzMessageMentions({
         text: `Hello @Alice (nostr:${explicitBob})`,
         members: roomMembers,
         senderPublicKey: BOT_PUBLIC_KEY,
       }),
-    ).toThrow('Buzz mention "@alice" is ambiguous');
+    ).toEqual([BOB_PUBLIC_KEY]);
   });
 
   it("bounds ambiguous-member guidance", () => {
