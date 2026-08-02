@@ -305,6 +305,44 @@ describe("Buzz bus lifecycle", () => {
     expect(relayMocks.close).toHaveBeenCalledOnce();
   });
 
+  it("resolves standalone native mentions from the room snapshot before publishing", async () => {
+    relayMocks.auth.mockResolvedValue("ok");
+    relayMocks.profileEvents = [
+      finalizeEvent(
+        {
+          kind: 0,
+          created_at: 1_700_000_000,
+          content: JSON.stringify({ display_name: "Alice" }),
+          tags: [],
+        },
+        Uint8Array.from(Buffer.from(SENDER_PRIVATE_KEY, "hex")),
+      ),
+    ];
+
+    await sendBuzzTextOneShot({
+      relayUrl: "wss://buzz.example.com",
+      privateKey: PRIVATE_KEY,
+      channelId: CHANNEL_ID,
+      text: "Hello @Alice",
+      threadId: "root-id",
+    });
+
+    expect(relayMocks.publish.mock.calls[0]?.[0]).toMatchObject({
+      kind: 9,
+      content: "Hello @Alice",
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", "root-id", "", "reply"],
+        ["p", SENDER_PUBLIC_KEY],
+      ],
+    });
+    expect(relayMocks.subscriptions.some((entry) => subscriptionIncludesKind(entry, 39002))).toBe(
+      true,
+    );
+    expect(relayMocks.subscriptions.some((entry) => subscriptionIncludesKind(entry, 0))).toBe(true);
+    expect(relayMocks.close).toHaveBeenCalledOnce();
+  });
+
   it("sends room and thread typing without waiting for a relay acknowledgement", async () => {
     relayMocks.auth.mockResolvedValue("ok");
     const bus = await startBuzzBus({

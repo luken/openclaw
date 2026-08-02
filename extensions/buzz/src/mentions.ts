@@ -164,7 +164,7 @@ function normalizeMembers(members: readonly BuzzMentionMember[]): Map<string, Bu
 
 export function hasBuzzMentionSyntax(text: string): boolean {
   const stripped = stripCodeRegions(text);
-  return stripped.includes("@") || stripped.includes(NIP_27_PREFIX);
+  return extractMentionNames(stripped, []).length > 0 || extractNostrPubkeys(stripped).length > 0;
 }
 
 export function resolveBuzzMessageMentions(params: {
@@ -174,7 +174,8 @@ export function resolveBuzzMessageMentions(params: {
 }): string[] {
   const stripped = stripCodeRegions(params.text);
   const explicitPublicKeys = extractNostrPubkeys(stripped);
-  const hasMentionText = stripped.includes("@") || explicitPublicKeys.length > 0;
+  const fallbackNames = extractMentionNames(stripped, []);
+  const hasMentionText = fallbackNames.length > 0 || explicitPublicKeys.length > 0;
   if (!hasMentionText) {
     return [];
   }

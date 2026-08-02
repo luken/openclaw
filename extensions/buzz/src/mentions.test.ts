@@ -1,6 +1,10 @@
 import { nip19 } from "nostr-tools";
 import { describe, expect, it } from "vitest";
-import { resolveBuzzMessageMentions, type BuzzMentionMember } from "./mentions.js";
+import {
+  hasBuzzMentionSyntax,
+  resolveBuzzMessageMentions,
+  type BuzzMentionMember,
+} from "./mentions.js";
 
 const BOT_PUBLIC_KEY = "a".repeat(64);
 const ALICE_PUBLIC_KEY = "b".repeat(64);
@@ -83,5 +87,6 @@ describe("Buzz outbound mentions", () => {
         senderPublicKey: BOT_PUBLIC_KEY,
       }),
     ).toEqual([]);
+    expect(hasBuzzMentionSyntax("mail user@example.com")).toBe(false);
   });
 });
