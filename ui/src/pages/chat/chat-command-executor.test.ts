@@ -133,6 +133,83 @@ describe("executeSlashCommand directives", () => {
     expectNoRequestCall(request, "sessions.patch");
   });
 
+  it("does not patch through a replacement connection after loading session state", async () => {
+    let resolveList: ((value: SessionsListResult) => void) | undefined;
+    const listResult = new Promise<SessionsListResult>((resolve) => {
+      resolveList = resolve;
+    });
+    const request = vi.fn(async (method: string) => {
+      if (method === "sessions.list") {
+        return await listResult;
+      }
+      if (method === "sessions.patch") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected method: ${method}`);
+    });
+    const client = { request } as unknown as GatewayBrowserClient;
+    let current = true;
+
+    const pending = executeSlashCommand(client, "agent:main:main", "think", "high", {
+      isCurrent: () => current,
+    });
+    current = false;
+    resolveList?.({
+      sessions: [
+        row("agent:main:main", {
+          thinkingOptions: ["off", "low", "high"],
+        }),
+      ],
+    });
+
+    const result = await pending;
+    expect(result.failed).toBe(true);
+    expectNoRequestCall(request, "sessions.patch");
+  });
+
+  it("rechecks live scopes before patching after loading session state", async () => {
+    let resolveList: ((value: SessionsListResult) => void) | undefined;
+    const listResult = new Promise<SessionsListResult>((resolve) => {
+      resolveList = resolve;
+    });
+    const request = vi.fn(async (method: string) => {
+      if (method === "sessions.list") {
+        return await listResult;
+      }
+      if (method === "sessions.patch") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected method: ${method}`);
+    });
+    const client = { request } as unknown as GatewayBrowserClient;
+    let snapshot = {
+      client,
+      phase: "connected" as const,
+      hello: {
+        auth: { role: "operator", scopes: ["operator.admin"] },
+        features: { methods: ["sessions.patch"] },
+      } as ApplicationGatewaySnapshot["hello"],
+    };
+
+    const pending = executeSlashCommand(client, "agent:main:main", "think", "high", {
+      sessionAccessSnapshot: snapshot,
+      readSessionAccessSnapshot: () => snapshot,
+      isCurrent: () => true,
+    });
+    snapshot = restrictedSnapshot(client, ["sessions.patch"]);
+    resolveList?.({
+      sessions: [
+        row("agent:main:main", {
+          thinkingOptions: ["off", "low", "high"],
+        }),
+      ],
+    });
+
+    const result = await pending;
+    expect(result.failed).toBe(true);
+    expectNoRequestCall(request, "sessions.patch");
+  });
+
   it("resolves the legacy main alias for bare /model", async () => {
     const request = vi.fn(async (method: string, _payload?: unknown) => {
       if (method === "sessions.list") {

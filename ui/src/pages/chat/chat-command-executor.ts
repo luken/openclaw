@@ -68,6 +68,8 @@ type SlashCommandResult = {
 type SlashCommandContext = {
   sessions: SessionCapability;
   sessionAccessSnapshot: Pick<ApplicationGatewaySnapshot, "client" | "hello" | "phase">;
+  readSessionAccessSnapshot?: () => Pick<ApplicationGatewaySnapshot, "client" | "hello" | "phase">;
+  isCurrent?: () => boolean;
   chatModelCatalog?: ModelCatalogEntry[];
   modelCatalog?: ModelCatalogEntry[];
   sessionsResult?: SessionsListResult | null;
@@ -75,6 +77,26 @@ type SlashCommandContext = {
   defaultAgentId?: string;
   agentId?: string;
 };
+
+function assertCurrentSlashCommand(context: SlashCommandContext): void {
+  if (context.isCurrent?.() === false) {
+    throw new Error("The Gateway connection changed. Retry the command.");
+  }
+}
+
+function requireSessionMutationAccess(
+  context: SlashCommandContext,
+  request: Parameters<typeof readSessionMethodAccess>[1],
+): void {
+  assertCurrentSlashCommand(context);
+  const access = readSessionMethodAccess(
+    context.readSessionAccessSnapshot?.() ?? context.sessionAccessSnapshot,
+    request,
+  );
+  if (!access.allowed) {
+    throw new Error(access.reason);
+  }
+}
 
 async function patchSession(
   context: SlashCommandContext,
@@ -86,13 +108,10 @@ async function patchSession(
     ...selectedGlobalScope(sessionKey, context),
     ...patch,
   };
-  const access = readSessionMethodAccess(context.sessionAccessSnapshot, {
+  requireSessionMutationAccess(context, {
     method: "sessions.patch",
     params,
   });
-  if (!access.allowed) {
-    throw new Error(access.reason);
-  }
   return await patchChatCommandSessionSettings(context, sessionKey, patch);
 }
 
@@ -193,13 +212,10 @@ async function executeCompact(
 ): Promise<SlashCommandResult> {
   try {
     const options = selectedGlobalScope(sessionKey, context);
-    const access = readSessionMethodAccess(context.sessionAccessSnapshot, {
+    requireSessionMutationAccess(context, {
       method: "sessions.compact",
       requiredScope: "operator.admin",
     });
-    if (!access.allowed) {
-      throw new Error(access.reason);
-    }
     const result = await context.sessions.compact(sessionKey, options);
     if (result?.ok !== true) {
       const reason = typeof result?.reason === "string" ? result.reason.trim() : "";
@@ -846,6 +862,7 @@ async function executeSteer(
         content: t("chat.commandResults.steer.noActiveRun"),
       };
     }
+    assertCurrentSlashCommand(context);
     const ackStatus = normalizeSteerChatSendAckStatus(
       await client.request("chat.send", {
         sessionKey: resolved.key,
@@ -888,6 +905,7 @@ async function executeRedirect(
           resolved.error === "empty" ? t("chat.commandResults.redirect.usage") : resolved.error,
       };
     }
+    assertCurrentSlashCommand(context);
     const resp = await context.sessions.steer(
       resolved.key,
       resolved.message,

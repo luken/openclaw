@@ -414,4 +414,79 @@ describe("conversation reset confirmation", () => {
     expect(result).toBe("cancelled");
     expect(reset).not.toHaveBeenCalled();
   });
+
+  it("does not clear through a replacement Gateway after confirmation", async () => {
+    let settleConfirmation: ((confirmed: boolean) => void) | undefined;
+    const confirmation = new Promise<boolean>((resolve) => {
+      settleConfirmation = resolve;
+    });
+    const reset = vi.fn();
+    const originalClient = { request: vi.fn() } as unknown as GatewayBrowserClient;
+    const replacementClient = { request: vi.fn() } as unknown as GatewayBrowserClient;
+    const host = {
+      client: originalClient,
+      connected: true,
+      connectionEpoch: 1,
+      hello: {
+        auth: { role: "operator", scopes: ["operator.admin"] },
+        features: { methods: ["sessions.reset"] },
+      } as ApplicationGatewaySnapshot["hello"],
+      sessionKey: "agent:main:current",
+      chatRunId: null,
+      confirmConversationReset: vi.fn(async () => await confirmation),
+      sessions: { reset },
+      lastError: null as string | null,
+      chatError: null as string | null,
+    };
+
+    const pending = dispatchChatSlashCommand(host as never, "clear", "", {
+      sendResetMessage: vi.fn(),
+    });
+    host.client = replacementClient;
+    host.connectionEpoch += 1;
+    host.hello = {
+      auth: { role: "operator", scopes: ["operator.write"] },
+      features: { methods: ["sessions.reset"] },
+    } as ApplicationGatewaySnapshot["hello"];
+    settleConfirmation?.(true);
+
+    await expect(pending).resolves.toBe("failed");
+    expect(reset).not.toHaveBeenCalled();
+    expect(host.lastError).toContain("connection changed");
+  });
+
+  it("rechecks /clear scope after confirmation", async () => {
+    let settleConfirmation: ((confirmed: boolean) => void) | undefined;
+    const confirmation = new Promise<boolean>((resolve) => {
+      settleConfirmation = resolve;
+    });
+    const reset = vi.fn();
+    const host = {
+      ...legacyConnectedSessionAccess(),
+      connectionEpoch: 1,
+      hello: {
+        auth: { role: "operator", scopes: ["operator.admin"] },
+        features: { methods: ["sessions.reset"] },
+      } as ApplicationGatewaySnapshot["hello"],
+      sessionKey: "agent:main:current",
+      chatRunId: null,
+      confirmConversationReset: vi.fn(async () => await confirmation),
+      sessions: { reset },
+      lastError: null as string | null,
+      chatError: null as string | null,
+    };
+
+    const pending = dispatchChatSlashCommand(host as never, "clear", "", {
+      sendResetMessage: vi.fn(),
+    });
+    host.hello = {
+      auth: { role: "operator", scopes: ["operator.write"] },
+      features: { methods: ["sessions.reset"] },
+    } as ApplicationGatewaySnapshot["hello"];
+    settleConfirmation?.(true);
+
+    await expect(pending).resolves.toBe("failed");
+    expect(reset).not.toHaveBeenCalled();
+    expect(host.lastError).toContain("operator.admin");
+  });
 });

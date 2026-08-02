@@ -54,6 +54,13 @@ type ChatCommandSendOptions = ChatCommandResetOptions & {
 
 type ChatCommandDispatchResult = "completed" | "failed" | "uncertain" | "cancelled" | "deferred";
 
+type ChatCommandTarget = {
+  client: GatewayBrowserClient;
+  connectionEpoch: number;
+  sessionKey: string;
+  agentId?: string;
+};
+
 export type ChatCommandHost = Parameters<typeof handleAbortChat>[0] &
   Parameters<typeof clearChatHistory>[0] & {
     sessions: SessionCapability;
@@ -99,6 +106,32 @@ function requireChatSessionAction(
   }
   setChatCommandError(host, access.reason);
   return false;
+}
+
+function captureChatCommandTarget(host: ChatCommandHost): ChatCommandTarget | null {
+  if (!host.client || !host.connected) {
+    return null;
+  }
+  return {
+    client: host.client,
+    connectionEpoch: host.connectionEpoch,
+    sessionKey: host.sessionKey,
+    agentId: scopedAgentIdForSession(host, host.sessionKey),
+  };
+}
+
+function isChatCommandTargetCurrent(host: ChatCommandHost, target: ChatCommandTarget): boolean {
+  return (
+    host.connected &&
+    host.client === target.client &&
+    host.connectionEpoch === target.connectionEpoch &&
+    visibleSessionMatches(host, target.sessionKey, target.agentId)
+  );
+}
+
+function failStaleChatCommand(host: ChatCommandHost): ChatCommandDispatchResult {
+  setChatCommandError(host, "The Gateway connection changed. Retry the command.");
+  return "failed";
 }
 
 function remoteSlashCommandCacheKey(agentId: string | undefined): string {
@@ -277,9 +310,19 @@ export async function dispatchChatSlashCommand(
       if (!requireChatSessionAction(host, "reset")) {
         return "failed";
       }
+      const target = captureChatCommandTarget(host);
+      if (!target) {
+        return "failed";
+      }
       const confirmation = await confirmConversationResetForCurrentSession(host);
       if (confirmation !== "confirmed") {
         return confirmation;
+      }
+      if (!isChatCommandTargetCurrent(host, target)) {
+        return failStaleChatCommand(host);
+      }
+      if (!requireChatSessionAction(host, "reset")) {
+        return "failed";
       }
       return await clearChatHistory(host);
     }
@@ -305,25 +348,23 @@ export async function dispatchChatSlashCommand(
     return "failed";
   }
 
-  const targetClient = host.client;
-  const targetConnectionEpoch = host.connectionEpoch;
-  const targetSessionKey = host.sessionKey;
-  const targetAgentId = scopedAgentIdForSession(host, targetSessionKey);
-  const targetIsCurrent = () =>
-    host.connected &&
-    host.client === targetClient &&
-    host.connectionEpoch === targetConnectionEpoch &&
-    visibleSessionMatches(host, targetSessionKey, targetAgentId);
+  const target = captureChatCommandTarget(host);
+  if (!target) {
+    return "failed";
+  }
+  const targetIsCurrent = () => isChatCommandTargetCurrent(host, target);
   let result: Awaited<ReturnType<typeof executeSlashCommand>>;
   try {
-    result = await executeSlashCommand(targetClient, targetSessionKey, name, args, {
+    result = await executeSlashCommand(target.client, target.sessionKey, name, args, {
       sessions: host.sessions,
       sessionAccessSnapshot: currentSessionAccessSnapshot(host),
+      readSessionAccessSnapshot: () => currentSessionAccessSnapshot(host),
+      isCurrent: targetIsCurrent,
       chatModelCatalog: host.chatModelCatalog,
       sessionsResult: host.sessionsResult,
       sessionsResultAgentId: host.sessionsResultAgentId,
       defaultAgentId: resolveUiDefaultAgentId(host),
-      agentId: targetAgentId,
+      agentId: target.agentId,
     });
   } catch (err) {
     if (targetIsCurrent()) {
@@ -377,7 +418,7 @@ export async function dispatchChatSlashCommand(
 
   if (result.sessionPatch && "modelOverride" in result.sessionPatch) {
     host.sessions.setModelOverride(
-      targetSessionKey,
+      target.sessionKey,
       result.sessionPatch.modelOverride?.value ?? null,
     );
     if (targetIsCurrent()) {
