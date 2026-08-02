@@ -6,6 +6,7 @@ import {
 } from "openclaw/plugin-sdk/channel-core";
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-outbound";
 import { createChannelDirectoryAdapter } from "openclaw/plugin-sdk/directory-runtime";
+import { parseThreadSessionSuffix } from "openclaw/plugin-sdk/routing";
 import {
   createComputedAccountStatusAdapter,
   createDefaultChannelRuntimeState,
@@ -139,9 +140,11 @@ export const buzzPlugin = createChatChannelPlugin<ResolvedBuzzAccount, BuzzProbe
         });
       },
       resolveSessionConversation: ({ rawId }) => {
-        const channelId = parseBuzzTarget(rawId);
+        const { baseSessionKey, threadId } = parseThreadSessionSuffix(rawId);
+        const channelId = parseBuzzTarget(baseSessionKey ?? rawId);
         return {
           id: channelId,
+          threadId,
           baseConversationId: channelId,
           parentConversationCandidates: [channelId],
         };

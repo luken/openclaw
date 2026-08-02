@@ -13,4 +13,21 @@ describe("Buzz channel guidance", () => {
     );
     expect(buzzPlugin.messaging?.targetResolver?.hint).toBe("<room UUID|configured room name>");
   });
+
+  it("resolves Buzz reply sessions without treating the thread as part of the room UUID", () => {
+    const roomId = "64f4debf-e7af-438c-8dcd-d6fbbe77405d";
+    const threadId = "584e8d00bab48310ea80ff5f62550f824242bbc333fc4c259d7ae80be025c8aa";
+
+    expect(
+      buzzPlugin.messaging?.resolveSessionConversation?.({
+        kind: "group",
+        rawId: `buzz:${roomId}:thread:${threadId}`,
+      }),
+    ).toEqual({
+      id: roomId,
+      threadId,
+      baseConversationId: roomId,
+      parentConversationCandidates: [roomId],
+    });
+  });
 });
