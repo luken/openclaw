@@ -109,7 +109,7 @@ export type TestChatPane = HTMLElement & {
   renderPaneHeader: (
     workspace: ReturnType<typeof createSessionWorkspaceProps>,
     tasks: ReturnType<typeof createBackgroundTasksProps>,
-    row: undefined,
+    row: GatewaySessionRow | undefined,
     catalog: boolean,
     agentWorkspace: undefined,
     workspaceGit: boolean,
