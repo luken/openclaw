@@ -1,15 +1,22 @@
 // Matrix tests cover http client plugin behavior.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { matrixTransportRequestMock } = vi.hoisted(() => ({
-  matrixTransportRequestMock: vi.fn(),
-}));
+const { matrixCreateTransportMock, matrixTransportCloseMock, matrixTransportRequestMock } =
+  vi.hoisted(() => {
+    const matrixTransportRequestMock = vi.fn();
+    const matrixTransportCloseMock = vi.fn(async () => undefined);
+    return {
+      matrixTransportRequestMock,
+      matrixTransportCloseMock,
+      matrixCreateTransportMock: vi.fn(() => ({
+        request: matrixTransportRequestMock,
+        close: matrixTransportCloseMock,
+      })),
+    };
+  });
 
 vi.mock("./transport.js", () => ({
-  createMatrixTransport: () => ({
-    request: matrixTransportRequestMock,
-    close: vi.fn(async () => undefined),
-  }),
+  createMatrixTransport: matrixCreateTransportMock,
 }));
 
 let MatrixAuthedHttpClient: typeof import("./http-client.js").MatrixAuthedHttpClient;
@@ -20,6 +27,8 @@ describe("MatrixAuthedHttpClient", () => {
   });
 
   beforeEach(() => {
+    matrixCreateTransportMock.mockClear();
+    matrixTransportCloseMock.mockClear();
     matrixTransportRequestMock.mockReset();
   });
 
@@ -52,6 +61,13 @@ describe("MatrixAuthedHttpClient", () => {
     });
 
     expect(result).toEqual({ ok: true });
+    expect(matrixCreateTransportMock).toHaveBeenCalledWith({
+      ssrfPolicy: { allowPrivateNetwork: true },
+      dispatcherPolicy: {
+        mode: "explicit-proxy",
+        proxyUrl: "http://proxy.internal:8080",
+      },
+    });
     expect(matrixTransportRequestMock).toHaveBeenCalledWith({
       homeserver: "https://matrix.example.org",
       accessToken: "token",
@@ -60,11 +76,6 @@ describe("MatrixAuthedHttpClient", () => {
       qs: undefined,
       body: undefined,
       timeoutMs: 5000,
-      ssrfPolicy: { allowPrivateNetwork: true },
-      dispatcherPolicy: {
-        mode: "explicit-proxy",
-        proxyUrl: "http://proxy.internal:8080",
-      },
       allowAbsoluteEndpoint: true,
     });
   });
@@ -160,6 +171,27 @@ describe("MatrixAuthedHttpClient", () => {
     });
 
     expect(result).toEqual(payload);
+  });
+
+  it("closes an owned transport but leaves an injected transport open", async () => {
+    const ownedClient = new MatrixAuthedHttpClient({
+      homeserver: "https://matrix.example.org",
+      accessToken: "token",
+    });
+    await ownedClient.close();
+    expect(matrixTransportCloseMock).toHaveBeenCalledOnce();
+
+    const borrowedClose = vi.fn(async () => undefined);
+    const borrowedClient = new MatrixAuthedHttpClient({
+      homeserver: "https://matrix.example.org",
+      accessToken: "token",
+      transport: {
+        request: matrixTransportRequestMock,
+        close: borrowedClose,
+      } as never,
+    });
+    await borrowedClient.close();
+    expect(borrowedClose).not.toHaveBeenCalled();
   });
 
   it("raises HTTP errors with status code metadata", async () => {

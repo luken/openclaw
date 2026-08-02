@@ -101,6 +101,7 @@ describe("action client helpers", () => {
   it("reuses active monitor client when available", async () => {
     const activeClient = createMockMatrixClient();
     getActiveMatrixClientMock.mockReturnValue(activeClient);
+    acquireSharedMatrixClientMock.mockResolvedValue(activeClient);
 
     const result = await withResolvedActionClient(
       { cfg: TEST_CFG, accountId: "default" },
@@ -111,13 +112,15 @@ describe("action client helpers", () => {
     );
 
     expect(result).toBe("ok");
-    expect(acquireSharedMatrixClientMock).not.toHaveBeenCalled();
+    expect(acquireSharedMatrixClientMock).toHaveBeenCalledOnce();
+    expect(releaseSharedClientInstanceMock).toHaveBeenCalledWith(activeClient, "stop");
     expect(activeClient["stop"]).not.toHaveBeenCalled();
   });
 
   it("starts active clients when started readiness is required", async () => {
     const activeClient = createMockMatrixClient();
     getActiveMatrixClientMock.mockReturnValue(activeClient);
+    acquireSharedMatrixClientMock.mockResolvedValue(activeClient);
 
     await withStartedActionClient({ cfg: TEST_CFG, accountId: "default" }, async (client) => {
       expect(client).toBe(activeClient);
@@ -125,6 +128,7 @@ describe("action client helpers", () => {
 
     expect(activeClient["start"]).toHaveBeenCalledTimes(1);
     expect(activeClient["prepareForOneOff"]).not.toHaveBeenCalled();
+    expect(releaseSharedClientInstanceMock).toHaveBeenCalledWith(activeClient, "persist");
     expect(activeClient["stop"]).not.toHaveBeenCalled();
     expect(activeClient["stopAndPersist"]).not.toHaveBeenCalled();
   });

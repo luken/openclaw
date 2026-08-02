@@ -29,6 +29,7 @@ import { resolveConfiguredMatrixBotUserIds } from "../accounts.js";
 import { setActiveMatrixClient } from "../active-client.js";
 import {
   backfillMatrixAuthDeviceIdAfterStartup,
+  acquireSharedMatrixClient,
   isBunRuntime,
   resolveMatrixAuth,
   resolveMatrixAuthContext,
@@ -223,6 +224,7 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
       }
       threadBindingManager?.stop();
       if (client) {
+        setActiveMatrixClient(null, auth.accountId);
         await releaseSharedClientInstance(client, mode);
       }
     } finally {
@@ -297,7 +299,7 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
   };
 
   try {
-    client = await resolveSharedMatrixClient({
+    client = await acquireSharedMatrixClient({
       cfg,
       auth: authWithLimit,
       startClient: false,

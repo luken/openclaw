@@ -76,10 +76,6 @@ async function resolveRuntimeMatrixClient(opts: {
     accountId: opts.accountId,
   });
   const active = getActiveMatrixClient(authContext.accountId);
-  if (active) {
-    await opts.onResolved?.(active, { preparedByDefault: false });
-    return { client: active, stopOnDone: false };
-  }
   const client = await acquireSharedMatrixClient({
     cfg,
     timeoutMs: opts.timeoutMs,
@@ -87,7 +83,7 @@ async function resolveRuntimeMatrixClient(opts: {
     startClient: false,
   });
   try {
-    await opts.onResolved?.(client, { preparedByDefault: true });
+    await opts.onResolved?.(client, { preparedByDefault: active !== client });
   } catch (err) {
     await releaseSharedClientInstance(client, "stop");
     throw err;

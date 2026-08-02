@@ -9,26 +9,36 @@ import {
   type QueryParams,
 } from "./transport.js";
 
-type MatrixAuthedHttpClientParams = {
+type MatrixAuthedHttpClientBaseParams = {
   homeserver: string;
   accessToken: string;
-  ssrfPolicy?: SsrFPolicy;
-  dispatcherPolicy?: PinnedDispatcherPolicy;
-  transport?: MatrixTransport;
 };
+
+type MatrixAuthedHttpClientParams = MatrixAuthedHttpClientBaseParams &
+  (
+    | {
+        transport?: undefined;
+        ssrfPolicy?: SsrFPolicy;
+        dispatcherPolicy?: PinnedDispatcherPolicy;
+      }
+    | {
+        transport: MatrixTransport;
+        ssrfPolicy?: never;
+        dispatcherPolicy?: never;
+      }
+  );
 
 export class MatrixAuthedHttpClient {
   private readonly homeserver: string;
   private readonly accessToken: string;
-  private readonly ssrfPolicy?: SsrFPolicy;
-  private readonly dispatcherPolicy?: PinnedDispatcherPolicy;
   private readonly transport: MatrixTransport;
+  private readonly ownsTransport: boolean;
 
   constructor(params: MatrixAuthedHttpClientParams) {
     this.homeserver = params.homeserver;
     this.accessToken = params.accessToken;
-    this.ssrfPolicy = params.ssrfPolicy;
-    this.dispatcherPolicy = params.dispatcherPolicy;
+    // Borrowed transports are owned by MatrixClientBase and must not be closed here.
+    this.ownsTransport = params.transport === undefined;
     this.transport =
       params.transport ??
       createMatrixTransport({
@@ -53,8 +63,6 @@ export class MatrixAuthedHttpClient {
       qs: params.qs,
       body: params.body,
       timeoutMs: params.timeoutMs,
-      ssrfPolicy: this.ssrfPolicy,
-      dispatcherPolicy: this.dispatcherPolicy,
       allowAbsoluteEndpoint: params.allowAbsoluteEndpoint,
     });
     if (!response.ok) {
@@ -96,8 +104,6 @@ export class MatrixAuthedHttpClient {
       raw: true,
       maxBytes: params.maxBytes,
       readIdleTimeoutMs: params.readIdleTimeoutMs,
-      ssrfPolicy: this.ssrfPolicy,
-      dispatcherPolicy: this.dispatcherPolicy,
       allowAbsoluteEndpoint: params.allowAbsoluteEndpoint,
     });
     if (!response.ok) {
@@ -107,6 +113,8 @@ export class MatrixAuthedHttpClient {
   }
 
   async close(): Promise<void> {
-    await this.transport.close();
+    if (this.ownsTransport) {
+      await this.transport.close();
+    }
   }
 }

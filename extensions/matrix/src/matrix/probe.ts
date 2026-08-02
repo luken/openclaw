@@ -62,8 +62,12 @@ export async function probeMatrix(params: {
         ssrfPolicy: params.ssrfPolicy,
         dispatcherPolicy: params.dispatcherPolicy,
       });
-      // The client wrapper resolves user ID via whoami when needed.
-      return { ...result, ok: true, userId: (await client.getUserId()) ?? null };
+      try {
+        // The client wrapper resolves user ID via whoami when needed.
+        return { ...result, ok: true, userId: (await client.getUserId()) ?? null };
+      } finally {
+        client.stopWithoutPersist();
+      }
     },
     (error) => ({
       ok: false,

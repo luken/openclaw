@@ -86,4 +86,29 @@ describe("client bootstrap", () => {
 
     expect(releaseSharedClientInstanceMock).toHaveBeenCalledWith(sharedClient, "stop");
   });
+
+  it("leases an active monitor client for the full wrapped operation", async () => {
+    const activeClient = createMockMatrixClient();
+    getActiveMatrixClientMock.mockReturnValue(activeClient);
+    acquireSharedMatrixClientMock.mockResolvedValue(activeClient);
+
+    await expect(
+      withResolvedRuntimeMatrixClient(
+        {
+          cfg: TEST_CFG,
+          accountId: "default",
+        },
+        async (client) => {
+          expect(client).toBe(activeClient);
+          expect(releaseSharedClientInstanceMock).not.toHaveBeenCalled();
+          return "ok";
+        },
+      ),
+    ).resolves.toBe("ok");
+
+    expect(acquireSharedMatrixClientMock).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "default", startClient: false }),
+    );
+    expect(releaseSharedClientInstanceMock).toHaveBeenCalledWith(activeClient, "stop");
+  });
 });

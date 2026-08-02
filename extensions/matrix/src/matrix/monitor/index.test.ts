@@ -89,7 +89,7 @@ const hoisted = vi.hoisted(() => {
   };
   const stopThreadBindingManager = vi.fn();
   const releaseSharedClientInstance = vi.fn(async () => true);
-  const resolveSharedMatrixClient = vi.fn(async (params: { startClient?: boolean }) => {
+  const acquireSharedMatrixClient = vi.fn(async (params: { startClient?: boolean }) => {
     if (params.startClient === false) {
       callOrder.push("prepare-client");
       return client;
@@ -125,7 +125,7 @@ const hoisted = vi.hoisted(() => {
     logger,
     registeredOnRoomMessage: null as null | ((roomId: string, event: unknown) => Promise<void>),
     releaseSharedClientInstance,
-    resolveSharedMatrixClient,
+    acquireSharedMatrixClient,
     resolveTextChunkLimit,
     runMatrixStartupMaintenance,
     registeredHealthySyncGetter: undefined as undefined | (() => number | undefined),
@@ -273,7 +273,8 @@ vi.mock("../client.js", () => ({
   resolveMatrixAuthContext: vi.fn(() => ({
     accountId: "default",
   })),
-  resolveSharedMatrixClient: hoisted.resolveSharedMatrixClient,
+  acquireSharedMatrixClient: hoisted.acquireSharedMatrixClient,
+  resolveSharedMatrixClient: hoisted.acquireSharedMatrixClient,
 }));
 
 vi.mock("../client/shared.js", () => ({
@@ -442,7 +443,7 @@ describe("monitorMatrixProvider", () => {
     delete (hoisted.accountConfig as { rooms?: Record<string, unknown> }).rooms;
     hoisted.resolveTextChunkLimit.mockReset().mockReturnValue(4000);
     hoisted.releaseSharedClientInstance.mockReset().mockResolvedValue(true);
-    hoisted.resolveSharedMatrixClient
+    hoisted.acquireSharedMatrixClient
       .mockReset()
       .mockImplementation(async (params: { startClient?: boolean }) => {
         if (params.startClient === false) {
@@ -674,7 +675,7 @@ describe("monitorMatrixProvider", () => {
   });
 
   it("marks early startup failures as error before the monitor loop starts", async () => {
-    hoisted.resolveSharedMatrixClient.mockImplementation(
+    hoisted.acquireSharedMatrixClient.mockImplementation(
       async (params: { startClient?: boolean }) => {
         if (params.startClient === false) {
           throw new Error("prepare failed");
@@ -721,7 +722,7 @@ describe("monitorMatrixProvider", () => {
 
   it("aborts stalled startup promptly and releases the shared client without persist", async () => {
     const abortController = new AbortController();
-    hoisted.resolveSharedMatrixClient.mockImplementation(
+    hoisted.acquireSharedMatrixClient.mockImplementation(
       async (params: { startClient?: boolean; abortSignal?: AbortSignal }) => {
         if (params.startClient === false) {
           hoisted.callOrder.push("prepare-client");
@@ -842,6 +843,9 @@ describe("monitorMatrixProvider", () => {
     expect(hoisted.releaseSharedClientInstance).toHaveBeenCalledWith(hoisted.client, "persist");
     expect(hoisted.setActiveMatrixClient).toHaveBeenNthCalledWith(1, hoisted.client, "default");
     expect(hoisted.setActiveMatrixClient).toHaveBeenNthCalledWith(2, null, "default");
+    expect(hoisted.setActiveMatrixClient.mock.invocationCallOrder[1]).toBeLessThan(
+      hoisted.releaseSharedClientInstance.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
   });
 
   it("disables cold-start backlog dropping only when sync state is cleanly persisted", async () => {

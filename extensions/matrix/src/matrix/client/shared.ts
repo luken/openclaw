@@ -21,7 +21,25 @@ type SharedMatrixClientState = {
   cryptoReady: boolean;
   startPromise: Promise<void> | null;
   leases: number;
+  releaseMode: MatrixSharedClientReleaseMode;
 };
+
+type MatrixSharedClientReleaseMode = "stop" | "persist" | "discard";
+
+const MATRIX_RELEASE_MODE_PRIORITY: Record<MatrixSharedClientReleaseMode, number> = {
+  stop: 0,
+  discard: 1,
+  persist: 2,
+};
+
+function mergeMatrixReleaseMode(
+  current: MatrixSharedClientReleaseMode,
+  requested: MatrixSharedClientReleaseMode,
+): MatrixSharedClientReleaseMode {
+  return MATRIX_RELEASE_MODE_PRIORITY[requested] > MATRIX_RELEASE_MODE_PRIORITY[current]
+    ? requested
+    : current;
+}
 
 const sharedClientStates = new Map<string, SharedMatrixClientState>();
 const sharedClientPromises = new Map<string, Promise<SharedMatrixClientState>>();
@@ -68,6 +86,7 @@ async function createSharedMatrixClient(params: {
     cryptoReady: false,
     startPromise: null,
     leases: 0,
+    releaseMode: "stop",
   };
 }
 
@@ -289,20 +308,21 @@ export function stopSharedClientInstance(client: MatrixClient): void {
 
 export async function releaseSharedClientInstance(
   client: MatrixClient,
-  mode: "stop" | "persist" | "discard" = "stop",
+  mode: MatrixSharedClientReleaseMode = "stop",
 ): Promise<boolean> {
   const state = findSharedClientStateByInstance(client);
   if (!state) {
     return false;
   }
+  state.releaseMode = mergeMatrixReleaseMode(state.releaseMode, mode);
   state.leases = Math.max(0, state.leases - 1);
   if (state.leases > 0) {
     return false;
   }
   deleteSharedClientState(state);
-  if (mode === "persist") {
+  if (state.releaseMode === "persist") {
     await client.stopAndPersist();
-  } else if (mode === "discard") {
+  } else if (state.releaseMode === "discard") {
     client.stopWithoutPersist();
   } else {
     client.stop();

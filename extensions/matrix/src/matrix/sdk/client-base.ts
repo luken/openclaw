@@ -135,6 +135,7 @@ export abstract class MatrixClientBase {
     | undefined;
   protected readonly autoBootstrapCrypto: boolean;
   protected stopPersistPromise: Promise<void> | null = null;
+  private transportClosePromise: Promise<void> | null = null;
   protected verificationSummaryListenerBound = false;
   protected currentSyncState: MatrixSyncState | null = null;
   protected readonly transactionScopeHomeserver: string;
@@ -183,8 +184,6 @@ export abstract class MatrixClientBase {
     this.httpClient = new MatrixAuthedHttpClient({
       homeserver,
       accessToken,
-      ssrfPolicy: opts.ssrfPolicy,
-      dispatcherPolicy: opts.dispatcherPolicy,
       transport: this.transport,
     });
     this.localTimeoutMs = resolveMatrixLocalTimeoutMs(opts.localTimeoutMs);
@@ -538,9 +537,10 @@ export abstract class MatrixClientBase {
   }
 
   stop(): void {
+    // stop() is terminal for this instance because it disposes the shared HTTP transport.
     this.stopSyncWithoutPersist();
     this.decryptBridge?.stop();
-    void this.transport.close();
+    this.transportClosePromise ??= this.transport.close();
     // Final persist on shutdown
     this.syncStore?.markCleanShutdown();
     if (loadedMatrixCryptoRuntime) {
@@ -570,13 +570,13 @@ export abstract class MatrixClientBase {
 
   async stopAndPersist(): Promise<void> {
     this.stop();
-    await this.stopPersistPromise;
+    await Promise.all([this.stopPersistPromise, this.transportClosePromise]);
   }
 
   stopWithoutPersist(): void {
     this.stopSyncWithoutPersist();
     this.decryptBridge?.stop();
-    void this.transport.close();
+    this.transportClosePromise ??= this.transport.close();
     this.stopPersistPromise = Promise.resolve();
   }
 

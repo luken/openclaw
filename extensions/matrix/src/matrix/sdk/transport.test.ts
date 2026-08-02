@@ -2,7 +2,12 @@
 import http from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MatrixMediaSizeLimitError } from "../media-errors.js";
-import { createMatrixTransport, performMatrixRequest } from "./transport.js";
+import { LogService } from "./logger.js";
+import {
+  createMatrixTransport,
+  type MatrixTransport,
+  MatrixTransportClosedError,
+} from "./transport.js";
 
 const TEST_UNDICI_RUNTIME_DEPS_KEY = "__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__";
 
@@ -17,6 +22,21 @@ function stubRuntimeFetch(fetchImpl: typeof fetch, Agent: unknown = function Moc
     ProxyAgent: function MockProxyAgent() {},
     fetch: fetchImpl,
   };
+}
+
+type OneShotMatrixRequestParams = Parameters<MatrixTransport["request"]>[0] &
+  NonNullable<Parameters<typeof createMatrixTransport>[0]>;
+
+async function performMatrixRequest(
+  params: OneShotMatrixRequestParams,
+): Promise<{ response: Response; text: string; buffer: Buffer }> {
+  const { ssrfPolicy, dispatcherPolicy, ...request } = params;
+  const transport = createMatrixTransport({ ssrfPolicy, dispatcherPolicy });
+  try {
+    return await transport.request(request);
+  } finally {
+    await transport.close();
+  }
 }
 
 describe("performMatrixRequest", () => {
@@ -542,6 +562,41 @@ describe("MatrixTransport fetch", () => {
     clearTestUndiciRuntimeDepsOverride();
   });
 
+  it("reuses real TCP connections across sequential requests", async () => {
+    let connectionCount = 0;
+    const server = http.createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    server.on("connection", () => {
+      connectionCount += 1;
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const { port } = server.address() as { port: number };
+    const transport = createMatrixTransport({ ssrfPolicy: { allowPrivateNetwork: true } });
+
+    try {
+      for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
+        const result = await transport.request({
+          homeserver: `http://127.0.0.1:${port}`,
+          accessToken: "token",
+          method: "GET",
+          endpoint: "/_matrix/client/v3/account/whoami",
+          timeoutMs: 5000,
+        });
+        expect(result.response.status).toBe(200);
+      }
+      expect(connectionCount).toBeLessThanOrEqual(2);
+    } finally {
+      await transport.close();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
   it("reuses the pinned dispatcher until its owning transport closes", async () => {
     const close = vi.fn(async () => undefined);
     const Agent = vi.fn(function MockAgent() {
@@ -560,31 +615,107 @@ describe("MatrixTransport fetch", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("opens one shared exponential cooldown after a local socket allocation failure", async () => {
-    vi.useFakeTimers();
-    vi.spyOn(Math, "random").mockReturnValue(0);
-    const socketError = Object.assign(new Error("address unavailable"), {
-      code: "EADDRNOTAVAIL",
+  it("rejects new requests after its dispatcher pool closes", async () => {
+    const close = vi.fn(async () => undefined);
+    const Agent = vi.fn(function MockAgent() {
+      return { close };
     });
-    const runtimeFetch = vi
-      .fn<typeof fetch>()
-      .mockRejectedValueOnce(new TypeError("fetch failed", { cause: socketError }))
-      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
-      .mockRejectedValueOnce(new TypeError("fetch failed", { cause: socketError }));
-    stubRuntimeFetch(runtimeFetch);
+    const runtimeFetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    stubRuntimeFetch(runtimeFetch, Agent);
     const transport = createMatrixTransport({ ssrfPolicy: { allowPrivateNetwork: true } });
     const url = "http://127.0.0.1:8008/_matrix/client/v3/sync";
+    const warnSpy = vi.spyOn(LogService, "warn").mockImplementation(() => undefined);
 
-    await expect(transport.fetch(url)).rejects.toThrow("fetch failed");
-    await expect(transport.fetch(url)).rejects.toThrow("backing off");
-    expect(runtimeFetch).toHaveBeenCalledTimes(1);
+    try {
+      await transport.fetch(url);
+      await transport.close();
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    await expect(transport.fetch(url)).resolves.toBeInstanceOf(Response);
-    await expect(transport.fetch(url)).rejects.toThrow("fetch failed");
-    await expect(transport.fetch(url)).rejects.toThrow("backing off");
-    expect(runtimeFetch).toHaveBeenCalledTimes(3);
-    await transport.close();
+      const closedRequest = transport.fetch(url);
+      await expect(closedRequest).rejects.toBeInstanceOf(MatrixTransportClosedError);
+      await expect(transport.fetch(url)).rejects.toMatchObject({
+        code: "MATRIX_TRANSPORT_CLOSED",
+      });
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(Agent).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledOnce();
+      expect(runtimeFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("defers dispatcher close until all concurrent response borrowers finish", async () => {
+    const responseControllers: Array<ReadableStreamDefaultController<Uint8Array>> = [];
+    const close = vi.fn(async () => undefined);
+    const Agent = vi.fn(function MockAgent() {
+      return { close };
+    });
+    const runtimeFetch = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              responseControllers.push(controller);
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    stubRuntimeFetch(runtimeFetch, Agent);
+    const transport = createMatrixTransport({ ssrfPolicy: { allowPrivateNetwork: true } });
+    const url = "http://127.0.0.1:8008/_matrix/client/v3/sync";
+    const firstFetch = transport.fetch(url);
+    const secondFetch = transport.fetch(url);
+    await vi.waitFor(() => expect(runtimeFetch).toHaveBeenCalledTimes(2));
+
+    let closeSettled = false;
+    const closePromise = transport.close().then(() => {
+      closeSettled = true;
+    });
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+
+    responseControllers[0]?.enqueue(new TextEncoder().encode("{}"));
+    responseControllers[0]?.close();
+    await expect(firstFetch).resolves.toBeInstanceOf(Response);
+    expect(closeSettled).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+
+    responseControllers[1]?.enqueue(new TextEncoder().encode("{}"));
+    responseControllers[1]?.close();
+    await expect(secondFetch).resolves.toBeInstanceOf(Response);
+    await closePromise;
+    expect(closeSettled).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("bounds retained dispatchers and closes overflow entries after use", async () => {
+    const debugSpy = vi.spyOn(LogService, "debug").mockImplementation(() => undefined);
+    const close = vi.fn(async () => undefined);
+    const Agent = vi.fn(function MockAgent() {
+      return { close };
+    });
+    const runtimeFetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    stubRuntimeFetch(runtimeFetch, Agent);
+    const transport = createMatrixTransport({ ssrfPolicy: { allowPrivateNetwork: true } });
+
+    try {
+      for (let hostIndex = 1; hostIndex <= 9; hostIndex += 1) {
+        await transport.fetch(`http://127.0.0.${hostIndex}:8008/_matrix/client/v3/sync`);
+      }
+
+      expect(Agent).toHaveBeenCalledTimes(9);
+      expect(close).toHaveBeenCalledOnce();
+      expect(debugSpy).toHaveBeenCalledWith(
+        "MatrixTransport",
+        "Retiring pinned dispatcher (capacity)",
+      );
+      await transport.close();
+      expect(close).toHaveBeenCalledTimes(9);
+    } finally {
+      debugSpy.mockRestore();
+    }
   });
 
   it("preserves redirect success when the discarded body fails to cancel", async () => {

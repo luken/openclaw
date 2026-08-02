@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const createMatrixClientMock = vi.fn();
 const isBunRuntimeMock = vi.fn(() => false);
+const stopWithoutPersistMock = vi.fn();
 
 vi.mock("./probe.runtime.js", () => ({
   createMatrixClient: (...args: unknown[]) => createMatrixClientMock(...args),
@@ -20,6 +21,7 @@ describe("probeMatrix", () => {
     isBunRuntimeMock.mockReturnValue(false);
     createMatrixClientMock.mockResolvedValue({
       getUserId: vi.fn(async () => "@bot:example.org"),
+      stopWithoutPersist: stopWithoutPersistMock,
     });
   });
 
@@ -31,6 +33,7 @@ describe("probeMatrix", () => {
     });
 
     expect(result.ok).toBe(true);
+    expect(stopWithoutPersistMock).toHaveBeenCalledOnce();
     expect(createMatrixClientMock).toHaveBeenCalledWith({
       homeserver: "https://matrix.example.org",
       userId: undefined,
@@ -151,5 +154,23 @@ describe("probeMatrix", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("Matrix homeserver must use https://");
+  });
+
+  it("stops the temporary client when whoami fails", async () => {
+    createMatrixClientMock.mockResolvedValue({
+      getUserId: vi.fn(async () => {
+        throw new Error("whoami failed");
+      }),
+      stopWithoutPersist: stopWithoutPersistMock,
+    });
+
+    const result = await probeMatrix({
+      homeserver: "https://matrix.example.org",
+      accessToken: "tok",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("whoami failed");
+    expect(stopWithoutPersistMock).toHaveBeenCalledOnce();
   });
 });

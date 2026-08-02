@@ -57,6 +57,8 @@ function createMockClient(name: string) {
     name,
     start: vi.fn(async () => undefined),
     stop: vi.fn(() => undefined),
+    stopAndPersist: vi.fn(async () => undefined),
+    stopWithoutPersist: vi.fn(() => undefined),
     getJoinedRooms: vi.fn(async () => [] as string[]),
     crypto: undefined,
   };
@@ -293,6 +295,58 @@ describe("resolveSharedMatrixClient", () => {
       await releaseSharedClientInstance(mainClient as unknown as import("../sdk.js").MatrixClient),
     ).toBe(true);
     expect(mainClient.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a pending persist request until the final lease releases", async () => {
+    const mainAuth = authFor("main");
+    const mainClient = createMockClient("main");
+
+    resolveMatrixAuthMock.mockResolvedValue(mainAuth);
+    createMatrixClientMock.mockResolvedValue(mainClient);
+
+    await acquireSharedMatrixClient({ cfg: TEST_CFG, accountId: "main", startClient: false });
+    await acquireSharedMatrixClient({ cfg: TEST_CFG, accountId: "main", startClient: false });
+
+    expect(
+      await releaseSharedClientInstance(
+        mainClient as unknown as import("../sdk.js").MatrixClient,
+        "persist",
+      ),
+    ).toBe(false);
+    expect(mainClient.stopAndPersist).not.toHaveBeenCalled();
+
+    expect(
+      await releaseSharedClientInstance(
+        mainClient as unknown as import("../sdk.js").MatrixClient,
+        "stop",
+      ),
+    ).toBe(true);
+    expect(mainClient.stopAndPersist).toHaveBeenCalledOnce();
+    expect(mainClient.stop).not.toHaveBeenCalled();
+    expect(mainClient.stopWithoutPersist).not.toHaveBeenCalled();
+  });
+
+  it("preserves discard over ordinary stop when no lease requests persistence", async () => {
+    const mainAuth = authFor("main");
+    const mainClient = createMockClient("main");
+
+    resolveMatrixAuthMock.mockResolvedValue(mainAuth);
+    createMatrixClientMock.mockResolvedValue(mainClient);
+
+    await acquireSharedMatrixClient({ cfg: TEST_CFG, accountId: "main", startClient: false });
+    await acquireSharedMatrixClient({ cfg: TEST_CFG, accountId: "main", startClient: false });
+    await releaseSharedClientInstance(
+      mainClient as unknown as import("../sdk.js").MatrixClient,
+      "discard",
+    );
+    await releaseSharedClientInstance(
+      mainClient as unknown as import("../sdk.js").MatrixClient,
+      "stop",
+    );
+
+    expect(mainClient.stopWithoutPersist).toHaveBeenCalledOnce();
+    expect(mainClient.stopAndPersist).not.toHaveBeenCalled();
+    expect(mainClient.stop).not.toHaveBeenCalled();
   });
 
   it("rejects mismatched explicit account ids when auth is already resolved", async () => {

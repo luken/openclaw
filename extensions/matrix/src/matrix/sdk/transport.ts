@@ -1,9 +1,7 @@
-import { collectErrorGraphCandidates, extractErrorCode } from "openclaw/plugin-sdk/error-runtime";
 // Matrix plugin module implements transport behavior.
 import { parseMediaContentLength } from "openclaw/plugin-sdk/media-runtime";
-import { classifyTransientNetworkErrorCode } from "openclaw/plugin-sdk/retry-runtime";
-import { computeBackoff, type BackoffPolicy } from "openclaw/plugin-sdk/runtime-env";
 import { MatrixMediaSizeLimitError } from "../media-errors.js";
+import { LogService } from "./logger.js";
 import { readResponseWithLimit } from "./read-response-with-limit.js";
 import {
   buildTimeoutAbortSignal,
@@ -63,119 +61,71 @@ type MatrixRequestParams = {
   raw?: boolean;
   maxBytes?: number;
   readIdleTimeoutMs?: number;
-  ssrfPolicy?: SsrFPolicy;
-  dispatcherPolicy?: PinnedDispatcherPolicy;
   allowAbsoluteEndpoint?: boolean;
 };
 
-const MATRIX_TRANSPORT_MAX_CONCURRENT_REQUESTS = 4;
-const MATRIX_TRANSPORT_BACKOFF_POLICY = {
-  initialMs: 1_000,
-  maxMs: 60_000,
-  factor: 2,
-  jitter: 0.1,
-} satisfies BackoffPolicy;
 const MATRIX_TRANSPORT_MAX_RETAINED_DISPATCHERS = 8;
-function isMatrixConnectionError(error: unknown): boolean {
-  return collectErrorGraphCandidates(error, (current) => [current.cause, current.error]).some(
-    (candidate) => {
-      const code = extractErrorCode(candidate)?.trim().toUpperCase();
-      // EADDRNOTAVAIL proves the local socket could not be allocated before the request left.
-      return code === "EADDRNOTAVAIL" || classifyTransientNetworkErrorCode(code) === "pre-connect";
-    },
-  );
-}
 
-class MatrixRequestLimiter {
-  private active = 0;
-  private readonly waiters: Array<() => void> = [];
-  private closed = false;
+export class MatrixTransportClosedError extends Error {
+  readonly code = "MATRIX_TRANSPORT_CLOSED";
 
-  async acquire(): Promise<() => void> {
-    if (this.closed) {
-      throw new Error("Matrix transport is closed");
-    }
-    if (this.active >= MATRIX_TRANSPORT_MAX_CONCURRENT_REQUESTS) {
-      await new Promise<void>((resolve) => {
-        this.waiters.push(resolve);
-      });
-      if (this.closed) {
-        throw new Error("Matrix transport is closed");
-      }
-    }
-    this.active += 1;
-    let released = false;
-    return () => {
-      if (released) {
-        return;
-      }
-      released = true;
-      this.active -= 1;
-      this.waiters.shift()?.();
-    };
-  }
-
-  close(): void {
-    this.closed = true;
-    for (const resolve of this.waiters.splice(0)) {
-      resolve();
-    }
+  constructor() {
+    super("Matrix transport is closed");
+    this.name = "MatrixTransportClosedError";
   }
 }
 
-class MatrixConnectionFailureGate {
-  private consecutiveFailures = 0;
-  private retryAfterMs = 0;
-  private probeInFlight = false;
-
-  beginAttempt(): boolean {
-    const now = Date.now();
-    if (now < this.retryAfterMs) {
-      throw new Error(`Matrix transport is backing off for ${this.retryAfterMs - now}ms`);
-    }
-    if (this.consecutiveFailures === 0) {
-      return false;
-    }
-    if (this.probeInFlight) {
-      throw new Error("Matrix transport is waiting for a recovery probe");
-    }
-    this.probeInFlight = true;
-    return true;
+function sameAddressSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
   }
-
-  completeAttempt(params: { wasProbe: boolean; error?: unknown }): void {
-    if (params.error === undefined) {
-      this.consecutiveFailures = 0;
-      this.retryAfterMs = 0;
-      this.probeInFlight = false;
-      return;
-    }
-    if (params.wasProbe) {
-      this.probeInFlight = false;
-    }
-    if (!isMatrixConnectionError(params.error)) {
-      return;
-    }
-    this.consecutiveFailures += 1;
-    const delayMs = computeBackoff(MATRIX_TRANSPORT_BACKOFF_POLICY, this.consecutiveFailures);
-    this.retryAfterMs = Date.now() + delayMs;
+  const remaining = new Set(left);
+  if (remaining.size !== new Set(right).size) {
+    return false;
   }
+  return right.every((address) => remaining.has(address));
 }
 
 class MatrixPinnedDispatcherPool {
   private readonly entries = new Set<MatrixDispatcherEntry>();
   private readonly currentByHostname = new Map<string, MatrixDispatcherEntry>();
   private closed = false;
+  private closedWarningEmitted = false;
+  private drainPromise: Promise<void> | null = null;
+  private resolveDrain: (() => void) | null = null;
+
+  private resolveDrainIfComplete(): void {
+    if (!this.closed || this.entries.size > 0) {
+      return;
+    }
+    this.resolveDrain?.();
+    this.resolveDrain = null;
+  }
+
+  assertOpen(): void {
+    if (!this.closed) {
+      return;
+    }
+    if (!this.closedWarningEmitted) {
+      this.closedWarningEmitted = true;
+      LogService.warn("MatrixTransport", "Rejected request after terminal transport shutdown");
+    }
+    throw new MatrixTransportClosedError();
+  }
 
   private async closeEntry(entry: MatrixDispatcherEntry): Promise<void> {
     if (!entry.closePromise) {
-      entry.closePromise = closeDispatcher(entry.dispatcher);
+      entry.closePromise = closeDispatcher(entry.dispatcher).finally(() => {
+        this.entries.delete(entry);
+        this.resolveDrainIfComplete();
+      });
     }
     await entry.closePromise;
   }
 
-  private retire(entry: MatrixDispatcherEntry): void {
+  private retire(entry: MatrixDispatcherEntry, reason: "capacity" | "dns-change"): void {
     entry.retained = false;
+    LogService.debug("MatrixTransport", `Retiring pinned dispatcher (${reason})`);
     if (entry.references === 0) {
       void this.closeEntry(entry);
     }
@@ -192,7 +142,7 @@ class MatrixPinnedDispatcherPool {
       return;
     }
     this.currentByHostname.delete(entry[0]);
-    this.retire(entry[1]);
+    this.retire(entry[1], "capacity");
   }
 
   async acquire(params: {
@@ -200,13 +150,11 @@ class MatrixPinnedDispatcherPool {
     dispatcherPolicy?: PinnedDispatcherPolicy;
     ssrfPolicy?: SsrFPolicy;
   }): Promise<{ dispatcher: MatrixPinnedDispatcher; release: () => Promise<void> }> {
-    if (this.closed) {
-      throw new Error("Matrix transport is closed");
-    }
+    this.assertOpen();
     const existing = this.currentByHostname.get(params.pinned.hostname);
-    if (existing && existing.addresses.join("\u0000") !== params.pinned.addresses.join("\u0000")) {
+    if (existing && !sameAddressSet(existing.addresses, params.pinned.addresses)) {
       this.currentByHostname.delete(params.pinned.hostname);
-      this.retire(existing);
+      this.retire(existing, "dns-change");
     }
     const current = this.currentByHostname.get(params.pinned.hostname);
     const entry =
@@ -241,7 +189,7 @@ class MatrixPinnedDispatcherPool {
         }
         released = true;
         entry.references -= 1;
-        if (!entry.retained || this.closed) {
+        if ((!entry.retained || this.closed) && entry.references === 0) {
           await this.closeEntry(entry);
         }
       },
@@ -250,11 +198,27 @@ class MatrixPinnedDispatcherPool {
 
   async close(): Promise<void> {
     if (this.closed) {
+      await this.drainPromise;
       return;
     }
     this.closed = true;
+    this.drainPromise = new Promise<void>((resolve) => {
+      this.resolveDrain = resolve;
+    });
     this.currentByHostname.clear();
-    await Promise.all(Array.from(this.entries, (entry) => this.closeEntry(entry)));
+    // Active entries stay alive until their final response-body borrower releases them.
+    const idleEntries: MatrixDispatcherEntry[] = [];
+    for (const entry of this.entries) {
+      entry.retained = false;
+      if (entry.references === 0) {
+        idleEntries.push(entry);
+      }
+    }
+    for (const entry of idleEntries) {
+      void this.closeEntry(entry);
+    }
+    this.resolveDrainIfComplete();
+    await this.drainPromise;
   }
 }
 
@@ -476,7 +440,7 @@ async function fetchWithMatrixGuardedRedirects(params: {
         headers.delete("content-length");
       }
 
-      void response.body?.cancel().catch(() => undefined);
+      await response.body?.cancel().catch(() => undefined);
       await release?.();
       currentUrl = nextUrl;
     } catch (error) {
@@ -492,9 +456,6 @@ async function fetchWithMatrixGuardedRedirects(params: {
 
 export class MatrixTransport {
   private readonly dispatcherPool = new MatrixPinnedDispatcherPool();
-  private readonly limiter = new MatrixRequestLimiter();
-  private readonly failureGate = new MatrixConnectionFailureGate();
-  private closed = false;
 
   constructor(
     private readonly params: {
@@ -503,169 +464,146 @@ export class MatrixTransport {
     } = {},
   ) {}
 
-  private async run<T>(run: () => Promise<T>): Promise<T> {
-    const release = await this.limiter.acquire();
-    try {
-      const wasProbe = this.failureGate.beginAttempt();
-      try {
-        const result = await run();
-        this.failureGate.completeAttempt({ wasProbe });
-        return result;
-      } catch (error) {
-        this.failureGate.completeAttempt({ wasProbe, error });
-        throw error;
-      }
-    } finally {
-      release();
-    }
-  }
-
   readonly fetch = (async (resource: RequestInfo | URL, init?: RequestInit) => {
+    this.dispatcherPool.assertOpen();
     const url = withoutMatrixStateAfterSyncParam(toFetchUrl(resource));
     const { signal, ...requestInit } = init ?? {};
-    return await this.run(async () => {
-      const { response, release } = await fetchWithMatrixGuardedRedirects({
-        url,
-        init: requestInit,
-        signal: signal ?? undefined,
-        ssrfPolicy: this.params.ssrfPolicy,
-        dispatcherPolicy: this.params.dispatcherPolicy,
-        dispatcherPool: this.dispatcherPool,
-      });
-
-      try {
-        await enforceDeclaredResponseSize({
-          response,
-          maxBytes: MATRIX_SDK_RESPONSE_MAX_BYTES,
-          createError: (length) =>
-            new Error(
-              `Matrix SDK response exceeds size limit (${length} bytes > ${MATRIX_SDK_RESPONSE_MAX_BYTES} bytes)`,
-            ),
-        });
-        const body = await readResponseWithLimit(response, MATRIX_SDK_RESPONSE_MAX_BYTES, {
-          onOverflow: ({ maxBytes, size }) =>
-            new Error(`Matrix SDK response exceeds size limit (${size} bytes > ${maxBytes} bytes)`),
-        });
-        return buildBufferedResponse({
-          source: response,
-          body: Uint8Array.from(body),
-          url,
-        });
-      } finally {
-        await release();
-      }
+    const { response, release } = await fetchWithMatrixGuardedRedirects({
+      url,
+      init: requestInit,
+      signal: signal ?? undefined,
+      ssrfPolicy: this.params.ssrfPolicy,
+      dispatcherPolicy: this.params.dispatcherPolicy,
+      dispatcherPool: this.dispatcherPool,
     });
+
+    try {
+      await enforceDeclaredResponseSize({
+        response,
+        maxBytes: MATRIX_SDK_RESPONSE_MAX_BYTES,
+        createError: (length) =>
+          new Error(
+            `Matrix SDK response exceeds size limit (${length} bytes > ${MATRIX_SDK_RESPONSE_MAX_BYTES} bytes)`,
+          ),
+      });
+      const body = await readResponseWithLimit(response, MATRIX_SDK_RESPONSE_MAX_BYTES, {
+        onOverflow: ({ maxBytes, size }) =>
+          new Error(`Matrix SDK response exceeds size limit (${size} bytes > ${maxBytes} bytes)`),
+      });
+      return buildBufferedResponse({
+        source: response,
+        body: Uint8Array.from(body),
+        url,
+      });
+    } finally {
+      await release();
+    }
   }) as typeof fetch;
 
   async request(
     params: MatrixRequestParams,
   ): Promise<{ response: Response; text: string; buffer: Buffer }> {
-    return await this.run(async () => {
-      const isAbsoluteEndpoint =
-        params.endpoint.startsWith("http://") || params.endpoint.startsWith("https://");
-      if (isAbsoluteEndpoint && params.allowAbsoluteEndpoint !== true) {
-        throw new Error(
-          `Absolute Matrix endpoint is blocked by default: ${params.endpoint}. Set allowAbsoluteEndpoint=true to opt in.`,
-        );
+    this.dispatcherPool.assertOpen();
+    const isAbsoluteEndpoint =
+      params.endpoint.startsWith("http://") || params.endpoint.startsWith("https://");
+    if (isAbsoluteEndpoint && params.allowAbsoluteEndpoint !== true) {
+      throw new Error(
+        `Absolute Matrix endpoint is blocked by default: ${params.endpoint}. Set allowAbsoluteEndpoint=true to opt in.`,
+      );
+    }
+
+    const baseUrl = isAbsoluteEndpoint
+      ? new URL(params.endpoint)
+      : new URL(`${params.homeserver.replace(/\/+$/u, "")}${normalizeEndpoint(params.endpoint)}`);
+    applyQuery(baseUrl, params.qs);
+
+    const headers = new Headers();
+    headers.set("Accept", params.raw ? "*/*" : "application/json");
+    if (params.accessToken) {
+      headers.set("Authorization", `Bearer ${params.accessToken}`);
+    }
+
+    let body: BodyInit | undefined;
+    if (params.body !== undefined) {
+      if (
+        params.body instanceof Uint8Array ||
+        params.body instanceof ArrayBuffer ||
+        typeof params.body === "string"
+      ) {
+        body = params.body as BodyInit;
+      } else {
+        headers.set("Content-Type", "application/json");
+        body = JSON.stringify(params.body);
       }
+    }
 
-      const baseUrl = isAbsoluteEndpoint
-        ? new URL(params.endpoint)
-        : new URL(`${params.homeserver.replace(/\/+$/u, "")}${normalizeEndpoint(params.endpoint)}`);
-      applyQuery(baseUrl, params.qs);
+    const { response, release } = await fetchWithMatrixGuardedRedirects({
+      url: baseUrl.toString(),
+      init: {
+        method: params.method,
+        headers,
+        body,
+      },
+      timeoutMs: params.timeoutMs,
+      ssrfPolicy: this.params.ssrfPolicy,
+      dispatcherPolicy: this.params.dispatcherPolicy,
+      dispatcherPool: this.dispatcherPool,
+    });
 
-      const headers = new Headers();
-      headers.set("Accept", params.raw ? "*/*" : "application/json");
-      if (params.accessToken) {
-        headers.set("Authorization", `Bearer ${params.accessToken}`);
-      }
-
-      let body: BodyInit | undefined;
-      if (params.body !== undefined) {
-        if (
-          params.body instanceof Uint8Array ||
-          params.body instanceof ArrayBuffer ||
-          typeof params.body === "string"
-        ) {
-          body = params.body as BodyInit;
-        } else {
-          headers.set("Content-Type", "application/json");
-          body = JSON.stringify(params.body);
-        }
-      }
-
-      const { response, release } = await fetchWithMatrixGuardedRedirects({
-        url: baseUrl.toString(),
-        init: {
-          method: params.method,
-          headers,
-          body,
-        },
-        timeoutMs: params.timeoutMs,
-        ssrfPolicy: this.params.ssrfPolicy,
-        dispatcherPolicy: this.params.dispatcherPolicy,
-        dispatcherPool: this.dispatcherPool,
-      });
-
-      try {
-        if (params.raw) {
-          const rawMaxBytes = params.maxBytes ?? MATRIX_SDK_RESPONSE_MAX_BYTES;
-          await enforceDeclaredResponseSize({
-            response,
-            maxBytes: rawMaxBytes,
-            createError: (length) =>
-              new MatrixMediaSizeLimitError(
-                `Matrix media exceeds configured size limit (${length} bytes > ${rawMaxBytes} bytes)`,
-              ),
-          });
-          const bytes = await readResponseWithLimit(response, rawMaxBytes, {
-            onOverflow: ({ maxBytes, size }) =>
-              new MatrixMediaSizeLimitError(
-                `Matrix media exceeds configured size limit (${size} bytes > ${maxBytes} bytes)`,
-              ),
-            chunkTimeoutMs: params.readIdleTimeoutMs,
-          });
-          return {
-            response,
-            text: bytes.toString("utf8"),
-            buffer: bytes,
-          };
-        }
-        const jsonMaxBytes = params.maxBytes ?? MATRIX_JSON_RESPONSE_MAX_BYTES;
+    try {
+      if (params.raw) {
+        const rawMaxBytes = params.maxBytes ?? MATRIX_SDK_RESPONSE_MAX_BYTES;
         await enforceDeclaredResponseSize({
           response,
-          maxBytes: jsonMaxBytes,
+          maxBytes: rawMaxBytes,
           createError: (length) =>
-            new Error(
-              `Matrix JSON response exceeds configured size limit (${length} bytes > ${jsonMaxBytes} bytes)`,
+            new MatrixMediaSizeLimitError(
+              `Matrix media exceeds configured size limit (${length} bytes > ${rawMaxBytes} bytes)`,
             ),
         });
-        const buffer = await readResponseWithLimit(response, jsonMaxBytes, {
+        const bytes = await readResponseWithLimit(response, rawMaxBytes, {
           onOverflow: ({ maxBytes, size }) =>
-            new Error(
-              `Matrix JSON response exceeds configured size limit (${size} bytes > ${maxBytes} bytes)`,
+            new MatrixMediaSizeLimitError(
+              `Matrix media exceeds configured size limit (${size} bytes > ${maxBytes} bytes)`,
             ),
           chunkTimeoutMs: params.readIdleTimeoutMs,
-          onIdleTimeout: ({ chunkTimeoutMs }) =>
-            new Error(`Matrix JSON response stalled: no data received for ${chunkTimeoutMs}ms`),
         });
         return {
           response,
-          text: buffer.toString("utf8"),
-          buffer,
+          text: bytes.toString("utf8"),
+          buffer: bytes,
         };
-      } finally {
-        await release();
       }
-    });
+      const jsonMaxBytes = params.maxBytes ?? MATRIX_JSON_RESPONSE_MAX_BYTES;
+      await enforceDeclaredResponseSize({
+        response,
+        maxBytes: jsonMaxBytes,
+        createError: (length) =>
+          new Error(
+            `Matrix JSON response exceeds configured size limit (${length} bytes > ${jsonMaxBytes} bytes)`,
+          ),
+      });
+      const buffer = await readResponseWithLimit(response, jsonMaxBytes, {
+        onOverflow: ({ maxBytes, size }) =>
+          new Error(
+            `Matrix JSON response exceeds configured size limit (${size} bytes > ${maxBytes} bytes)`,
+          ),
+        chunkTimeoutMs: params.readIdleTimeoutMs,
+        onIdleTimeout: ({ chunkTimeoutMs }) =>
+          new Error(`Matrix JSON response stalled: no data received for ${chunkTimeoutMs}ms`),
+      });
+      return {
+        response,
+        text: buffer.toString("utf8"),
+        buffer,
+      };
+    } finally {
+      await release();
+    }
   }
 
   async close(): Promise<void> {
-    if (this.closed) {
-      return;
-    }
-    this.closed = true;
-    this.limiter.close();
+    // Terminal disposal: callers must create a new Matrix client/transport after shutdown.
     await this.dispatcherPool.close();
   }
 }
@@ -677,18 +615,4 @@ export function createMatrixTransport(
   } = {},
 ): MatrixTransport {
   return new MatrixTransport(params);
-}
-
-export async function performMatrixRequest(
-  params: MatrixRequestParams,
-): Promise<{ response: Response; text: string; buffer: Buffer }> {
-  const transport = createMatrixTransport({
-    ssrfPolicy: params.ssrfPolicy,
-    dispatcherPolicy: params.dispatcherPolicy,
-  });
-  try {
-    return await transport.request(params);
-  } finally {
-    await transport.close();
-  }
 }
