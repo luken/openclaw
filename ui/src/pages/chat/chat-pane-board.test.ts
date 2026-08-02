@@ -271,6 +271,26 @@ describe("chat pane board shell", () => {
     expect(sessions.create).not.toHaveBeenCalled();
   });
 
+  it("refuses a board reset without operator.admin", async () => {
+    const sessions = {
+      create: vi.fn(async () => "agent:main:new"),
+      reset: vi.fn(async () => "completed" as const),
+    } as unknown as SessionCapability;
+    const pane = createTestPane(sessions);
+    pane.context.gateway.snapshot.hello = {
+      auth: { role: "operator", scopes: ["operator.write"] },
+      features: { methods: ["sessions.reset"] },
+    } as typeof pane.context.gateway.snapshot.hello;
+    pane.boardProvider = mockBoardProvider("agent:main:current");
+
+    await expect(pane.createSession()).resolves.toBe(false);
+
+    expect(pane.resetConfirmationOpen).toBe(false);
+    expect(sessions.create).not.toHaveBeenCalled();
+    expect(sessions.reset).not.toHaveBeenCalled();
+    expect(pane.state.lastError).toContain("operator.admin");
+  });
+
   it("resets a board-bearing session in place so its dashboard stays", async () => {
     const reset = vi.fn(async () => "completed" as const);
     const sessions = {

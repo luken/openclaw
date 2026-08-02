@@ -130,7 +130,12 @@ export function createSessionContext(
         phase: "connected" as const,
         hello: {
           features: {
-            methods: ["taskSuggestions.list", "session.suggestions.list"],
+            methods: [
+              "taskSuggestions.list",
+              "session.suggestions.list",
+              "sessions.create",
+              "sessions.reset",
+            ],
           },
         },
       },
