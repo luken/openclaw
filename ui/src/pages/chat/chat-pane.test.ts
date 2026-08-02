@@ -665,6 +665,25 @@ describe("chat pane session creation lifecycle", () => {
     expect(state.chatError).toBe(state.lastError);
   });
 
+  it("requires operator.admin when New Chat inherits an incognito session", async () => {
+    const sessions = {
+      create: vi.fn(async () => "agent:main:new"),
+    } as unknown as SessionCapability;
+    const client = {} as GatewayBrowserClient;
+    const { pane, state } = createTestChatPane({ client, sessions });
+    state.sessionKey = "agent:main:dashboard:incognito-current";
+    pane.context.gateway.snapshot.hello = {
+      auth: { role: "operator", scopes: ["operator.write"] },
+      features: { methods: ["sessions.create"] },
+    } as typeof pane.context.gateway.snapshot.hello;
+
+    await expect(pane.createSession()).resolves.toBe(false);
+
+    expect(sessions.create).not.toHaveBeenCalled();
+    expect(state.lastError).toContain("operator.admin");
+    expect(state.chatError).toBe(state.lastError);
+  });
+
   it("drops a created session after a same-client reconnect", async () => {
     const created = createDeferred<string | null>();
     const sessions = {

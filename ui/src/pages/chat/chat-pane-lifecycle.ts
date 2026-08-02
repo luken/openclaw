@@ -22,6 +22,7 @@ import { resolveChatPaneObserverRunId } from "../../lib/observer-digest.ts";
 import { readSessionMethodAccess } from "../../lib/session-method-access.ts";
 import { sessionPullRequestsForGateway } from "../../lib/session-pull-requests.ts";
 import { parseCatalogSessionKey } from "../../lib/sessions/catalog-key.ts";
+import { resolveSessionCreateParams } from "../../lib/sessions/create.ts";
 import { resolveSessionKey, scopedAgentParamsForSession } from "../../lib/sessions/index.ts";
 import {
   areUiSessionKeysEquivalent,
@@ -179,12 +180,15 @@ export abstract class ChatPaneLifecycle extends ChatPaneBoard {
         scopedAgentParamsForSession(state, previousSessionKey).agentId ??
         resolveAgentIdFromSessionKey(previousSessionKey),
     };
+    const createRequestParams = {
+      ...resolveSessionCreateParams(createParams.currentSessionKey, createParams.agentId),
+    };
     const readCreateAccess = () =>
       readSessionMethodAccess(context.gateway.snapshot, {
         method: preservesBoard ? "sessions.reset" : "sessions.create",
         ...(preservesBoard
           ? { requiredScope: "operator.admin" as const }
-          : { params: createParams }),
+          : { params: createRequestParams }),
       });
     const publishCreateAccessError = (reason: string) => {
       state.lastError = reason;
