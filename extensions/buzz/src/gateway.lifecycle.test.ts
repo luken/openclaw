@@ -18,6 +18,7 @@ const gatewayMocks = vi.hoisted(() => ({
     | undefined,
   onMessageError: undefined as ((error: Error) => void) | undefined,
   onFatalError: undefined as ((error: Error) => void) | undefined,
+  onRoomDirectoryChanged: undefined as (() => void) | undefined,
   resolveAgentIdentity: vi.fn(),
   resolveAgentRoute: vi.fn(),
   startBuzzBus: vi.fn(),
@@ -63,6 +64,7 @@ describe("Buzz gateway lifecycle", () => {
     gatewayMocks.onMessage = undefined;
     gatewayMocks.onMessageError = undefined;
     gatewayMocks.onFatalError = undefined;
+    gatewayMocks.onRoomDirectoryChanged = undefined;
     gatewayMocks.busSendText.mockResolvedValue("event-id");
     gatewayMocks.busSendTyping.mockResolvedValue(undefined);
     gatewayMocks.sendBuzzTextOneShot.mockResolvedValue("standalone-event-id");
@@ -91,13 +93,47 @@ describe("Buzz gateway lifecycle", () => {
         ) => Promise<void>;
         onMessageError?: (error: Error) => void;
         onFatalError?: (error: Error) => void;
+        onRoomDirectoryChanged?: () => void;
       }): Promise<BuzzBus> => {
         gatewayMocks.onMessage = options.onMessage;
         gatewayMocks.onMessageError = options.onMessageError;
         gatewayMocks.onFatalError = options.onFatalError;
+        gatewayMocks.onRoomDirectoryChanged = options.onRoomDirectoryChanged;
         return createMockBus();
       },
     );
+  });
+
+  it("invalidates cached room targets when Buzz accepts newer room metadata", async () => {
+    const abortController = new AbortController();
+    const cfg = {
+      channels: {
+        buzz: {
+          relayUrl: "wss://buzz.example.com",
+          privateKey: PRIVATE_KEY,
+          groups: { [CHANNEL_ID]: {} },
+        },
+      },
+    } as OpenClawConfig;
+    const account = resolveBuzzAccount({ cfg });
+    const invalidateDirectoryCache = vi.fn();
+    const lifecycle = startBuzzGatewayAccount({
+      cfg,
+      accountId: account.accountId,
+      account,
+      runtime: {},
+      abortSignal: abortController.signal,
+      getStatus: vi.fn(),
+      setStatus: vi.fn(),
+      invalidateDirectoryCache,
+    } as unknown as ChannelGatewayContext<ResolvedBuzzAccount>);
+
+    await vi.waitFor(() => expect(gatewayMocks.startBuzzBus).toHaveBeenCalledOnce());
+    gatewayMocks.onRoomDirectoryChanged?.();
+    expect(invalidateDirectoryCache).toHaveBeenCalledOnce();
+
+    abortController.abort();
+    await expect(lifecycle).resolves.toBeUndefined();
   });
 
   it("restarts the account lifecycle when the bus reports a failure", async () => {

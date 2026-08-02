@@ -232,6 +232,7 @@ export async function startBuzzBus(options: {
   onProfilePublished?: (eventId: string) => void;
   onProfileError?: (error: Error) => void;
   onDirectoryError?: (error: Error) => void;
+  onRoomDirectoryChanged?: () => void;
   signal?: AbortSignal;
 }): Promise<BuzzBus> {
   const subscriptionBudget = resolveBuzzSubscriptionBudget(options.channelIds.length);
@@ -350,6 +351,7 @@ export async function startBuzzBus(options: {
       signal,
       onError: options.onDirectoryError,
       onFatalError: reportFatalError,
+      onRoomChanged: options.onRoomDirectoryChanged,
     });
     startBuzzRoomMembershipNotifications({
       relay,
