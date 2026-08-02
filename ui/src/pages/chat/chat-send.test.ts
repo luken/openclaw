@@ -4421,6 +4421,45 @@ describe("handleSendChat", () => {
     ]);
   });
 
+  it("does not convert a queued reset after the Gateway connection changes", async () => {
+    const confirmation = createDeferred<boolean>();
+    const replacementRequest = makeRequestMock({
+      "chat.send": () => ({ status: "ok" }),
+    });
+    const item = createQueuedLocalCommand("queued-reset-reconnect", "/reset");
+    const host = makeHost({
+      requestHandlers: {
+        "chat.history": () => idleChatHistory(),
+        "chat.send": () => ({ status: "ok" }),
+      },
+      chatQueue: [item],
+      connectionEpoch: 1,
+      confirmConversationReset: vi.fn(async () => await confirmation.promise),
+      hello: {
+        auth: { role: "operator", scopes: ["operator.write"] },
+        features: { methods: ["chat.send"] },
+      },
+    });
+    admitHostQueueItems(host);
+
+    const draining = retryReconnectableQueuedChatSends(host);
+    await waitForFast(() => expect(host.confirmConversationReset).toHaveBeenCalledOnce());
+    host.client = clientWithRequest(replacementRequest);
+    host.connectionEpoch = 2;
+    confirmation.resolve(true);
+    await draining;
+
+    expect(host.request).not.toHaveBeenCalledWith("chat.send", expect.anything());
+    expect(replacementRequest).not.toHaveBeenCalledWith("chat.send", expect.anything());
+    expect(listStoredChatOutboxes(host)[0]?.queue[0]).toEqual(
+      expect.objectContaining({
+        id: item.id,
+        localCommandName: "reset",
+        sendState: "failed",
+      }),
+    );
+  });
+
   it("retires a queued local command without applying its late result after a route switch", async () => {
     const command = createDeferred<Awaited<ReturnType<ExecuteSlashCommand>>>();
     executeSlashCommandMock.mockImplementationOnce(() => command.promise);

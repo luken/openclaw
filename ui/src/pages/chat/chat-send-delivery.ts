@@ -6,7 +6,7 @@ import type { ChatQueueItem } from "../../lib/chat/chat-types.ts";
 import { scopedAgentIdForSession, visibleSessionMatches } from "../../lib/sessions/index.ts";
 import { generateUUID } from "../../lib/uuid.ts";
 import { discardChatAttachmentDataUrls } from "./attachment-payload-store.ts";
-import type { ChatCommandResetOptions } from "./chat-commands.ts";
+import { readChatResetTargetAccess, type ChatCommandResetOptions } from "./chat-commands.ts";
 import { loadChatBranches, loadChatHistory, type ChatState } from "./chat-history.ts";
 import {
   flushStoredChatOutbox,
@@ -256,6 +256,16 @@ async function sendQueuedChatMessage(
   }
   const sessionKey = prepared.sessionKey ?? host.sessionKey;
   const setState = deliveryStateWriter(host, storageMode, sessionKey, id);
+  if (options?.target) {
+    const access = readChatResetTargetAccess(host, options.target);
+    if (!access.allowed) {
+      setState("failed", access.reason);
+      if (visibleSessionMatches(host, sessionKey, prepared.agentId)) {
+        setChatError(host, access.reason);
+      }
+      return "failed";
+    }
+  }
   if (prepared.skillWorkshopRevision && attachments.length) {
     setState("failed", "Skill Workshop revision requests do not support attachments.");
     return "failed";

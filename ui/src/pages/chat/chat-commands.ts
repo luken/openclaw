@@ -12,6 +12,7 @@ import {
   type SlashCommandDef,
 } from "../../lib/chat/commands.ts";
 import { resolveCurrentUserIdentity } from "../../lib/chat/current-user-identity.ts";
+import { readSessionMethodAccess } from "../../lib/session-method-access.ts";
 import {
   scopedAgentIdForSession,
   visibleSessionMatches,
@@ -46,6 +47,7 @@ const remoteSlashCommandCache = new WeakMap<
 export type ChatCommandResetOptions = {
   previousDraft?: string;
   restoreDraft?: boolean;
+  target?: ChatCommandTarget;
 };
 
 type ChatCommandSendOptions = ChatCommandResetOptions & {
@@ -54,7 +56,7 @@ type ChatCommandSendOptions = ChatCommandResetOptions & {
 
 type ChatCommandDispatchResult = "completed" | "failed" | "uncertain" | "cancelled" | "deferred";
 
-type ChatCommandTarget = {
+export type ChatCommandTarget = {
   client: GatewayBrowserClient;
   connectionEpoch: number;
   sessionKey: string;
@@ -108,7 +110,7 @@ function requireChatSessionAction(
   return false;
 }
 
-function captureChatCommandTarget(host: ChatCommandHost): ChatCommandTarget | null {
+export function captureChatCommandTarget(host: ChatCommandHost): ChatCommandTarget | null {
   if (!host.client || !host.connected) {
     return null;
   }
@@ -120,13 +122,39 @@ function captureChatCommandTarget(host: ChatCommandHost): ChatCommandTarget | nu
   };
 }
 
-function isChatCommandTargetCurrent(host: ChatCommandHost, target: ChatCommandTarget): boolean {
+export function isChatCommandTargetCurrent(
+  host: ChatCommandHost,
+  target: ChatCommandTarget,
+): boolean {
   return (
     host.connected &&
     host.client === target.client &&
     host.connectionEpoch === target.connectionEpoch &&
     visibleSessionMatches(host, target.sessionKey, target.agentId)
   );
+}
+
+export function readChatResetTargetAccess(
+  host: ChatCommandHost,
+  target: ChatCommandTarget,
+): { allowed: true } | { allowed: false; reason: string } {
+  if (!isChatCommandTargetCurrent(host, target)) {
+    return { allowed: false, reason: "The Gateway connection changed. Retry the command." };
+  }
+  const access = readSessionMethodAccess(currentSessionAccessSnapshot(host), {
+    method: "chat.send",
+    requiredScope: "operator.write",
+  });
+  return access.allowed ? { allowed: true } : access;
+}
+
+function requireChatResetTarget(host: ChatCommandHost, target: ChatCommandTarget): boolean {
+  const access = readChatResetTargetAccess(host, target);
+  if (access.allowed) {
+    return true;
+  }
+  setChatCommandError(host, access.reason);
+  return false;
 }
 
 function failStaleChatCommand(host: ChatCommandHost): ChatCommandDispatchResult {
@@ -299,11 +327,22 @@ export async function dispatchChatSlashCommand(
       }
       return (await host.createChatSession()) ? "completed" : "cancelled";
     case "reset": {
+      const target = captureChatCommandTarget(host);
+      if (!target || !requireChatResetTarget(host, target)) {
+        return "failed";
+      }
       const confirmation = await confirmConversationResetForCurrentSession(host);
       if (confirmation !== "confirmed") {
         return confirmation;
       }
-      await opts.sendResetMessage(args ? `/reset ${args}` : "/reset", opts);
+      if (!requireChatResetTarget(host, target)) {
+        return "failed";
+      }
+      await opts.sendResetMessage(args ? `/reset ${args}` : "/reset", {
+        previousDraft: opts.previousDraft,
+        restoreDraft: opts.restoreDraft,
+        target,
+      });
       return "completed";
     }
     case "clear": {

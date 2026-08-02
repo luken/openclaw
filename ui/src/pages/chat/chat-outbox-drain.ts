@@ -5,8 +5,11 @@ import { visibleSessionMatches } from "../../lib/sessions/index.ts";
 import { isUiGlobalSessionKey } from "../../lib/sessions/session-key.ts";
 import { releaseChatAttachmentPayloads } from "./attachment-payload-store.ts";
 import {
+  captureChatCommandTarget,
   confirmConversationResetForCurrentSession,
   dispatchChatSlashCommand,
+  readChatResetTargetAccess,
+  type ChatCommandTarget,
   type ChatCommandResetOptions,
 } from "./chat-commands.ts";
 import { loadChatHistory, type ChatHistoryResult, type ChatState } from "./chat-history.ts";
@@ -43,6 +46,7 @@ export type QueuedChatSendOptions = {
   restoreDraft?: boolean;
   routingSessionKey?: string;
   storageMode?: QueuedChatStorageMode;
+  target?: ChatCommandTarget;
 };
 
 export type ChatOutboxDrainDependencies = {
@@ -301,6 +305,17 @@ async function drainStoredChatOutbox(
       }
       syncVisibleChatQueueProjection(host);
       if (item.localCommandName === "reset") {
+        const resetTarget = captureChatCommandTarget(host);
+        if (!resetTarget) {
+          setCommandState("failed", "The Gateway connection changed. Retry the command.");
+          return "blocked";
+        }
+        const initialAccess = readChatResetTargetAccess(host, resetTarget);
+        if (!initialAccess.allowed) {
+          setCommandState("failed", initialAccess.reason);
+          dependencies.setChatError(host, initialAccess.reason);
+          return "blocked";
+        }
         const resetText = item.localCommandArgs ? `/reset ${item.localCommandArgs}` : "/reset";
         const convertResetToMessage = (sendState?: ChatQueueItem["sendState"]) =>
           updateQueuedMessageForSession(host, outbox.sessionKey, item.id, (entry) => ({
@@ -328,6 +343,16 @@ async function drainStoredChatOutbox(
           }
           continue;
         }
+        const currentAccess = readChatResetTargetAccess(host, resetTarget);
+        if (!currentAccess.allowed) {
+          setCommandState("failed", currentAccess.reason);
+          dependencies.setChatError(host, currentAccess.reason);
+          return "blocked";
+        }
+        lane.pendingOptions.set(item.id, {
+          ...lane.pendingOptions.get(item.id),
+          target: resetTarget,
+        });
         if (!convertResetToMessage()) {
           return "blocked";
         }
