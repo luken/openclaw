@@ -37,6 +37,16 @@ describe("Buzz outbound mentions", () => {
     expect(hasBuzzMentionSyntax("mail user@example.com")).toBe(false);
   });
 
+  it("rejects unknown non-ASCII mention text instead of publishing it without a tag", () => {
+    expect(() =>
+      resolveBuzzMessageMentions({
+        text: "Hello @不存在",
+        members: members({ publicKey: ALICE_PUBLIC_KEY, displayName: "Alice" }),
+        senderPublicKey: BOT_PUBLIC_KEY,
+      }),
+    ).toThrow("Buzz mention does not match a current room member");
+  });
+
   it("rejects unknown and ambiguous names without an explicit identity", () => {
     expect(() =>
       resolveBuzzMessageMentions({

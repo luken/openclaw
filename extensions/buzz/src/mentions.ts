@@ -7,6 +7,11 @@ export type BuzzMentionMember = {
   displayName?: string;
 };
 
+export type BuzzMentionSyntax = {
+  hasAtMention: boolean;
+  hasExplicitIdentity: boolean;
+};
+
 const HEX_PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/u;
 const NIP_27_PREFIX = "nostr:npub1";
 const NPUB_LENGTH = 63;
@@ -177,8 +182,16 @@ function normalizeMembers(members: readonly BuzzMentionMember[]): Map<string, Bu
 }
 
 export function hasBuzzMentionSyntax(text: string): boolean {
+  const syntax = inspectBuzzMentionSyntax(text);
+  return syntax.hasAtMention || syntax.hasExplicitIdentity;
+}
+
+export function inspectBuzzMentionSyntax(text: string): BuzzMentionSyntax {
   const stripped = stripCodeRegions(text);
-  return hasAtMentionCandidate(stripped) || extractNostrPubkeys(stripped).length > 0;
+  return {
+    hasAtMention: hasAtMentionCandidate(stripped),
+    hasExplicitIdentity: extractNostrPubkeys(stripped).length > 0,
+  };
 }
 
 export function resolveBuzzMessageMentions(params: {
@@ -231,6 +244,11 @@ export function resolveBuzzMessageMentions(params: {
       .filter((name): name is string => Boolean(name)),
   );
   const hasExplicitMentions = explicitPublicKeys.length > 0;
+  if (hasAtMentionCandidate(stripped) && names.length === 0 && !hasExplicitMentions) {
+    throw new Error(
+      "Buzz mention does not match a current room member; use nostr:npub... for an explicit identity",
+    );
+  }
   for (const name of names) {
     const matches = namesToPublicKeys.get(name) ?? [];
     if (matches.length !== 1) {
