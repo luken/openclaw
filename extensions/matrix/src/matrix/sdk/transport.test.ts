@@ -2,7 +2,7 @@
 import http from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MatrixMediaSizeLimitError } from "../media-errors.js";
-import { createMatrixGuardedFetch, performMatrixRequest } from "./transport.js";
+import { createMatrixTransport, performMatrixRequest } from "./transport.js";
 
 const TEST_UNDICI_RUNTIME_DEPS_KEY = "__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__";
 
@@ -10,9 +10,9 @@ function clearTestUndiciRuntimeDepsOverride(): void {
   Reflect.deleteProperty(globalThis as object, TEST_UNDICI_RUNTIME_DEPS_KEY);
 }
 
-function stubRuntimeFetch(fetchImpl: typeof fetch): void {
+function stubRuntimeFetch(fetchImpl: typeof fetch, Agent: unknown = function MockAgent() {}): void {
   (globalThis as Record<string, unknown>)[TEST_UNDICI_RUNTIME_DEPS_KEY] = {
-    Agent: function MockAgent() {},
+    Agent,
     EnvHttpProxyAgent: function MockEnvHttpProxyAgent() {},
     ProxyAgent: function MockProxyAgent() {},
     fetch: fetchImpl,
@@ -532,7 +532,7 @@ describe("performMatrixRequest", () => {
   });
 });
 
-describe("createMatrixGuardedFetch", () => {
+describe("MatrixTransport fetch", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearTestUndiciRuntimeDepsOverride();
@@ -540,6 +540,51 @@ describe("createMatrixGuardedFetch", () => {
 
   afterEach(() => {
     clearTestUndiciRuntimeDepsOverride();
+  });
+
+  it("reuses the pinned dispatcher until its owning transport closes", async () => {
+    const close = vi.fn(async () => undefined);
+    const Agent = vi.fn(function MockAgent() {
+      return { close };
+    });
+    const runtimeFetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    stubRuntimeFetch(runtimeFetch, Agent);
+    const transport = createMatrixTransport({ ssrfPolicy: { allowPrivateNetwork: true } });
+
+    await transport.fetch("http://127.0.0.1:8008/_matrix/client/v3/sync");
+    await transport.fetch("http://127.0.0.1:8008/_matrix/client/v3/sync");
+
+    expect(Agent).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    await transport.close();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("opens one shared exponential cooldown after a local socket allocation failure", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const socketError = Object.assign(new Error("address unavailable"), {
+      code: "EADDRNOTAVAIL",
+    });
+    const runtimeFetch = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("fetch failed", { cause: socketError }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockRejectedValueOnce(new TypeError("fetch failed", { cause: socketError }));
+    stubRuntimeFetch(runtimeFetch);
+    const transport = createMatrixTransport({ ssrfPolicy: { allowPrivateNetwork: true } });
+    const url = "http://127.0.0.1:8008/_matrix/client/v3/sync";
+
+    await expect(transport.fetch(url)).rejects.toThrow("fetch failed");
+    await expect(transport.fetch(url)).rejects.toThrow("backing off");
+    expect(runtimeFetch).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(transport.fetch(url)).resolves.toBeInstanceOf(Response);
+    await expect(transport.fetch(url)).rejects.toThrow("fetch failed");
+    await expect(transport.fetch(url)).rejects.toThrow("backing off");
+    expect(runtimeFetch).toHaveBeenCalledTimes(3);
+    await transport.close();
   });
 
   it("preserves redirect success when the discarded body fails to cancel", async () => {
@@ -563,9 +608,9 @@ describe("createMatrixGuardedFetch", () => {
     process.on("unhandledRejection", onUnhandledRejection);
 
     try {
-      const guardedFetch = createMatrixGuardedFetch({
+      const guardedFetch = createMatrixTransport({
         ssrfPolicy: { allowPrivateNetwork: true },
-      });
+      }).fetch;
       const response = await guardedFetch("http://127.0.0.1:8008/start");
 
       await expect(response.json()).resolves.toEqual({});
@@ -594,9 +639,9 @@ describe("createMatrixGuardedFetch", () => {
       ),
     );
 
-    const guardedFetch = createMatrixGuardedFetch({
+    const guardedFetch = createMatrixTransport({
       ssrfPolicy: { allowPrivateNetwork: true },
-    });
+    }).fetch;
 
     await expect(guardedFetch("http://127.0.0.1:8008/_matrix/client/v3/sync")).rejects.toThrow(
       "Matrix SDK response exceeds size limit (67108865 bytes > 67108864 bytes)",
@@ -616,9 +661,9 @@ describe("createMatrixGuardedFetch", () => {
     );
     stubRuntimeFetch(runtimeFetch);
 
-    const guardedFetch = createMatrixGuardedFetch({
+    const guardedFetch = createMatrixTransport({
       ssrfPolicy: { allowPrivateNetwork: true },
-    });
+    }).fetch;
 
     const response = await guardedFetch(
       "http://127.0.0.1:8008/_matrix/client/v3/sync?filter=abc&org.matrix.msc4222.use_state_after=true&timeout=30000",
@@ -643,9 +688,9 @@ describe("createMatrixGuardedFetch", () => {
     );
     stubRuntimeFetch(runtimeFetch);
 
-    const guardedFetch = createMatrixGuardedFetch({
+    const guardedFetch = createMatrixTransport({
       ssrfPolicy: { allowPrivateNetwork: true },
-    });
+    }).fetch;
 
     const url =
       "http://127.0.0.1:8008/_matrix/client/v3/account/whoami?org.matrix.msc4222.use_state_after=true";

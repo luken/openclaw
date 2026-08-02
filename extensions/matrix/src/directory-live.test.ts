@@ -19,6 +19,8 @@ vi.mock("./matrix/sdk/http-client.js", () => ({
     requestJson(params: unknown) {
       return requestJsonMock(params);
     }
+
+    async close() {}
   },
 }));
 

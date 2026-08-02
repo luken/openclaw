@@ -122,31 +122,35 @@ export async function listMatrixDirectoryPeersLive(
     return [];
   }
 
-  const res = await requestMatrixJson<MatrixUserDirectoryResponse>(context.client, {
-    method: "POST",
-    endpoint: "/_matrix/client/v3/user_directory/search",
-    body: {
-      search_term: context.query,
-      limit: resolveMatrixDirectoryLimit(params.limit),
-    },
-  });
-  const results = res.results ?? [];
-  return results
-    .map((entry) => {
-      const userId = normalizeOptionalString(entry.user_id);
-      if (!userId) {
-        return null;
-      }
-      const displayName = normalizeOptionalString(entry.display_name);
-      return {
-        kind: "user",
-        id: userId,
-        name: displayName,
-        handle: displayName ? `@${displayName}` : undefined,
-        raw: entry,
-      } satisfies ChannelDirectoryEntry;
-    })
-    .filter(Boolean) as ChannelDirectoryEntry[];
+  try {
+    const res = await requestMatrixJson<MatrixUserDirectoryResponse>(context.client, {
+      method: "POST",
+      endpoint: "/_matrix/client/v3/user_directory/search",
+      body: {
+        search_term: context.query,
+        limit: resolveMatrixDirectoryLimit(params.limit),
+      },
+    });
+    const results = res.results ?? [];
+    return results
+      .map((entry) => {
+        const userId = normalizeOptionalString(entry.user_id);
+        if (!userId) {
+          return null;
+        }
+        const displayName = normalizeOptionalString(entry.display_name);
+        return {
+          kind: "user",
+          id: userId,
+          name: displayName,
+          handle: displayName ? `@${displayName}` : undefined,
+          raw: entry,
+        } satisfies ChannelDirectoryEntry;
+      })
+      .filter(Boolean) as ChannelDirectoryEntry[];
+  } finally {
+    await context.client.close();
+  }
 }
 
 async function resolveMatrixRoomAlias(
@@ -202,38 +206,42 @@ export async function listMatrixDirectoryGroupsLive(
   const { client, queryLower } = context;
   const limit = resolveMatrixDirectoryLimit(params.limit);
 
-  if (directTarget?.startsWith("#")) {
-    const roomId = await resolveMatrixRoomAlias(client, directTarget);
-    if (!roomId) {
-      return [];
+  try {
+    if (directTarget?.startsWith("#")) {
+      const roomId = await resolveMatrixRoomAlias(client, directTarget);
+      if (!roomId) {
+        return [];
+      }
+      return [createGroupDirectoryEntry({ id: roomId, name: directTarget, handle: directTarget })];
     }
-    return [createGroupDirectoryEntry({ id: roomId, name: directTarget, handle: directTarget })];
-  }
 
-  const joined = await requestMatrixJson<MatrixJoinedRoomsResponse>(client, {
-    method: "GET",
-    endpoint: "/_matrix/client/v3/joined_rooms",
-  });
-  const rooms = (joined.joined_rooms ?? [])
-    .map((roomId) => normalizeOptionalString(roomId))
-    .filter((roomId): roomId is string => Boolean(roomId));
-  const results: ChannelDirectoryEntry[] = [];
-
-  for (const roomId of rooms) {
-    const name = await fetchMatrixRoomName(client, roomId);
-    if (!name || !normalizeLowercaseStringOrEmpty(name).includes(queryLower)) {
-      continue;
-    }
-    results.push({
-      kind: "group",
-      id: roomId,
-      name,
-      handle: `#${name}`,
+    const joined = await requestMatrixJson<MatrixJoinedRoomsResponse>(client, {
+      method: "GET",
+      endpoint: "/_matrix/client/v3/joined_rooms",
     });
-    if (results.length >= limit) {
-      break;
-    }
-  }
+    const rooms = (joined.joined_rooms ?? [])
+      .map((roomId) => normalizeOptionalString(roomId))
+      .filter((roomId): roomId is string => Boolean(roomId));
+    const results: ChannelDirectoryEntry[] = [];
 
-  return results;
+    for (const roomId of rooms) {
+      const name = await fetchMatrixRoomName(client, roomId);
+      if (!name || !normalizeLowercaseStringOrEmpty(name).includes(queryLower)) {
+        continue;
+      }
+      results.push({
+        kind: "group",
+        id: roomId,
+        name,
+        handle: `#${name}`,
+      });
+      if (results.length >= limit) {
+        break;
+      }
+    }
+
+    return results;
+  } finally {
+    await client.close();
+  }
 }

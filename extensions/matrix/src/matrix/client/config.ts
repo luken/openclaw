@@ -116,15 +116,19 @@ async function fetchMatrixWhoamiIdentity(params: {
     ssrfPolicy: params.ssrfPolicy,
     dispatcherPolicy: params.dispatcherPolicy,
   });
-  return await retryMatrixAuthRequest(
-    "matrix auth whoami",
-    async () =>
-      (await tempClient.doRequest(
-        "GET",
-        "/_matrix/client/v3/account/whoami",
-      )) as MatrixWhoamiIdentity,
-    params.signal,
-  );
+  try {
+    return await retryMatrixAuthRequest(
+      "matrix auth whoami",
+      async () =>
+        (await tempClient.doRequest(
+          "GET",
+          "/_matrix/client/v3/account/whoami",
+        )) as MatrixWhoamiIdentity,
+      params.signal,
+    );
+  } finally {
+    tempClient.stopWithoutPersist();
+  }
 }
 
 const MATRIX_CONFIG_STRING_FIELDS = [
@@ -616,17 +620,22 @@ export async function resolveMatrixAuth(params?: {
     ssrfPolicy: resolved.ssrfPolicy,
     dispatcherPolicy: resolved.dispatcherPolicy,
   });
-  const login = await retryMatrixAuthRequest(
-    "matrix auth login",
-    async () =>
-      (await loginClient.doRequest("POST", "/_matrix/client/v3/login", undefined, {
-        type: "m.login.password",
-        identifier: { type: "m.id.user", user: resolved.userId },
-        password,
-        device_id: resolved.deviceId,
-        initial_device_display_name: resolved.deviceName ?? "OpenClaw Gateway",
-      })) as MatrixLoginResponse,
-  );
+  let login: MatrixLoginResponse;
+  try {
+    login = await retryMatrixAuthRequest(
+      "matrix auth login",
+      async () =>
+        (await loginClient.doRequest("POST", "/_matrix/client/v3/login", undefined, {
+          type: "m.login.password",
+          identifier: { type: "m.id.user", user: resolved.userId },
+          password,
+          device_id: resolved.deviceId,
+          initial_device_display_name: resolved.deviceName ?? "OpenClaw Gateway",
+        })) as MatrixLoginResponse,
+    );
+  } finally {
+    loginClient.stopWithoutPersist();
+  }
 
   const loginAccessToken = login.access_token?.trim();
   if (!loginAccessToken) {

@@ -33,7 +33,7 @@ import { MatrixAuthedHttpClient } from "./http-client.js";
 import { MATRIX_IDB_PERSIST_INTERVAL_MS } from "./idb-persistence-lock.js";
 import { LogService, noop } from "./logger.js";
 import { MatrixRecoveryKeyStore } from "./recovery-key-store.js";
-import { createMatrixGuardedFetch } from "./transport.js";
+import { createMatrixTransport, type MatrixTransport } from "./transport.js";
 import type { MatrixClientEventMap, MatrixCryptoBootstrapApi, MatrixRawEvent } from "./types.js";
 import type { MatrixVerificationSummary } from "./verification-manager.js";
 
@@ -129,6 +129,7 @@ export abstract class MatrixClientBase {
   protected verificationManager?: import("./verification-manager.js").MatrixVerificationManager;
   protected readonly sendQueue = new KeyedAsyncQueue();
   protected readonly recoveryKeyStore: MatrixRecoveryKeyStore;
+  private readonly transport: MatrixTransport;
   protected cryptoBootstrapper?:
     | import("./crypto-bootstrap.js").MatrixCryptoBootstrapper<MatrixRawEvent>
     | undefined;
@@ -175,11 +176,16 @@ export abstract class MatrixClientBase {
     this.transactionScopeHomeserver = homeserver;
     this.transactionScopeAccessTokenHash = createHash("sha256").update(accessToken).digest("hex");
     this.transactionScopeDeviceId = opts.deviceId?.trim() || null;
+    this.transport = createMatrixTransport({
+      ssrfPolicy: opts.ssrfPolicy,
+      dispatcherPolicy: opts.dispatcherPolicy,
+    });
     this.httpClient = new MatrixAuthedHttpClient({
       homeserver,
       accessToken,
       ssrfPolicy: opts.ssrfPolicy,
       dispatcherPolicy: opts.dispatcherPolicy,
+      transport: this.transport,
     });
     this.localTimeoutMs = resolveMatrixLocalTimeoutMs(opts.localTimeoutMs);
     this.initialSyncLimit = opts.initialSyncLimit;
@@ -198,10 +204,6 @@ export abstract class MatrixClientBase {
     const cryptoCallbacks = this.encryptionEnabled
       ? this.recoveryKeyStore.buildCryptoCallbacks()
       : undefined;
-    const guardedFetch = createMatrixGuardedFetch({
-      ssrfPolicy: opts.ssrfPolicy,
-      dispatcherPolicy: opts.dispatcherPolicy,
-    });
     this.client = createMatrixJsClient({
       baseUrl: homeserver,
       accessToken,
@@ -214,7 +216,7 @@ export abstract class MatrixClientBase {
         if (dispatch) {
           await this.messageWireDispatchGuards.get(dispatch.transactionId)?.(dispatch);
         }
-        return await guardedFetch(resource, init);
+        return await this.transport.fetch(resource, init);
       }) as typeof fetch,
       store: this.syncStore,
       cryptoCallbacks: cryptoCallbacks as never,
@@ -538,6 +540,7 @@ export abstract class MatrixClientBase {
   stop(): void {
     this.stopSyncWithoutPersist();
     this.decryptBridge?.stop();
+    void this.transport.close();
     // Final persist on shutdown
     this.syncStore?.markCleanShutdown();
     if (loadedMatrixCryptoRuntime) {
@@ -573,6 +576,7 @@ export abstract class MatrixClientBase {
   stopWithoutPersist(): void {
     this.stopSyncWithoutPersist();
     this.decryptBridge?.stop();
+    void this.transport.close();
     this.stopPersistPromise = Promise.resolve();
   }
 

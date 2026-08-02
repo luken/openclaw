@@ -42,6 +42,8 @@ const authClientMocks = vi.hoisted(() => {
     async doRequest(...args: unknown[]) {
       return await matrixDoRequest(...args);
     }
+
+    stopWithoutPersist() {}
   }
   return { ensureMatrixSdkLoggingConfigured, matrixDoRequest, MatrixClient };
 });

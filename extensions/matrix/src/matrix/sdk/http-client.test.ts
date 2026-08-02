@@ -1,12 +1,15 @@
 // Matrix tests cover http client plugin behavior.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { performMatrixRequestMock } = vi.hoisted(() => ({
-  performMatrixRequestMock: vi.fn(),
+const { matrixTransportRequestMock } = vi.hoisted(() => ({
+  matrixTransportRequestMock: vi.fn(),
 }));
 
 vi.mock("./transport.js", () => ({
-  performMatrixRequest: performMatrixRequestMock,
+  createMatrixTransport: () => ({
+    request: matrixTransportRequestMock,
+    close: vi.fn(async () => undefined),
+  }),
 }));
 
 let MatrixAuthedHttpClient: typeof import("./http-client.js").MatrixAuthedHttpClient;
@@ -17,11 +20,11 @@ describe("MatrixAuthedHttpClient", () => {
   });
 
   beforeEach(() => {
-    performMatrixRequestMock.mockReset();
+    matrixTransportRequestMock.mockReset();
   });
 
   it("parses JSON responses and forwards absolute-endpoint opt-in", async () => {
-    performMatrixRequestMock.mockResolvedValue({
+    matrixTransportRequestMock.mockResolvedValue({
       response: new Response('{"ok":true}', {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -49,7 +52,7 @@ describe("MatrixAuthedHttpClient", () => {
     });
 
     expect(result).toEqual({ ok: true });
-    expect(performMatrixRequestMock).toHaveBeenCalledWith({
+    expect(matrixTransportRequestMock).toHaveBeenCalledWith({
       homeserver: "https://matrix.example.org",
       accessToken: "token",
       method: "GET",
@@ -67,7 +70,7 @@ describe("MatrixAuthedHttpClient", () => {
   });
 
   it("parses JSON responses when the media type casing differs", async () => {
-    performMatrixRequestMock.mockResolvedValue({
+    matrixTransportRequestMock.mockResolvedValue({
       response: new Response('{"ok":true}', {
         status: 200,
         headers: { "content-type": "Application/JSON; charset=utf-8" },
@@ -92,7 +95,7 @@ describe("MatrixAuthedHttpClient", () => {
   it.each(["application/json-seq", 'text/plain; profile="application/json"'])(
     "does not parse a non-JSON media type containing application/json (%s)",
     async (contentType) => {
-      performMatrixRequestMock.mockResolvedValue({
+      matrixTransportRequestMock.mockResolvedValue({
         response: new Response('{"ok":true}', {
           status: 200,
           headers: { "content-type": contentType },
@@ -116,7 +119,7 @@ describe("MatrixAuthedHttpClient", () => {
   );
 
   it("returns plain text when response is not JSON", async () => {
-    performMatrixRequestMock.mockResolvedValue({
+    matrixTransportRequestMock.mockResolvedValue({
       response: new Response("pong", {
         status: 200,
         headers: { "content-type": "text/plain" },
@@ -140,7 +143,7 @@ describe("MatrixAuthedHttpClient", () => {
 
   it("returns raw buffers for media requests", async () => {
     const payload = Buffer.from([1, 2, 3, 4]);
-    performMatrixRequestMock.mockResolvedValue({
+    matrixTransportRequestMock.mockResolvedValue({
       response: new Response(payload, { status: 200 }),
       text: payload.toString("utf8"),
       buffer: payload,
@@ -160,7 +163,7 @@ describe("MatrixAuthedHttpClient", () => {
   });
 
   it("raises HTTP errors with status code metadata", async () => {
-    performMatrixRequestMock.mockResolvedValue({
+    matrixTransportRequestMock.mockResolvedValue({
       response: new Response(JSON.stringify({ error: "forbidden" }), {
         status: 403,
         headers: { "content-type": "application/json" },
@@ -191,7 +194,7 @@ describe("MatrixAuthedHttpClient", () => {
   });
 
   it("throws descriptive error on malformed JSON success response", async () => {
-    performMatrixRequestMock.mockResolvedValue({
+    matrixTransportRequestMock.mockResolvedValue({
       response: new Response("NOT JSON {{{", {
         status: 200,
         headers: { "content-type": "application/json" },
