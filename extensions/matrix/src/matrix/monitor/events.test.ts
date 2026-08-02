@@ -146,6 +146,12 @@ function createHarness(params?: {
       listeners.set(eventName, listener);
       return client;
     }),
+    off: vi.fn((eventName: string, listener: (...args: unknown[]) => void) => {
+      if (listeners.get(eventName) === listener) {
+        listeners.delete(eventName);
+      }
+      return client;
+    }),
     sendMessage,
     getUserId: vi.fn(async () => {
       if (params?.selfUserIdError) {
@@ -186,7 +192,7 @@ function createHarness(params?: {
   const dmPolicy = params?.dmPolicy ?? "open";
   const allowFrom = params?.allowFrom ?? (dmPolicy === "open" ? ["*"] : []);
 
-  registerMatrixMonitorEvents({
+  const registration = registerMatrixMonitorEvents({
     cfg: params?.cfg ?? { channels: { matrix: {} } },
     client,
     auth: {
@@ -235,6 +241,9 @@ function createHarness(params?: {
     logVerboseMessage,
     flushTasks,
     runDetachedTask,
+    dispose: registration.dispose,
+    listenerCount: () => listeners.size,
+    offListener: client.off,
     roomMessageListener: listeners.get("room.message") as RoomEventListener | undefined,
     roomDecryptedEventListener: listeners.get("room.decrypted_event") as
       | RoomEventListener
@@ -249,6 +258,19 @@ function createHarness(params?: {
     roomJoinListener: listeners.get("room.join") as RoomEventListener | undefined,
   };
 }
+
+describe("registerMatrixMonitorEvents lifecycle", () => {
+  it("removes every registered listener exactly once", () => {
+    const harness = createHarness();
+    expect(harness.listenerCount()).toBe(8);
+
+    harness.dispose();
+    harness.dispose();
+
+    expect(harness.listenerCount()).toBe(0);
+    expect(harness.offListener).toHaveBeenCalledTimes(8);
+  });
+});
 
 describe("registerMatrixMonitorEvents verification routing", () => {
   it("does not repost historical verification completions during startup catch-up", async () => {

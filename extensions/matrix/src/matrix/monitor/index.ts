@@ -28,14 +28,13 @@ import { resolveMatrixAccountConfig } from "../account-config.js";
 import { resolveConfiguredMatrixBotUserIds } from "../accounts.js";
 import { setActiveMatrixClient } from "../active-client.js";
 import {
-  backfillMatrixAuthDeviceIdAfterStartup,
   acquireSharedMatrixClient,
+  backfillMatrixAuthDeviceIdAfterStartup,
   isBunRuntime,
   resolveMatrixAuth,
   resolveMatrixAuthContext,
-  resolveSharedMatrixClient,
 } from "../client.js";
-import { releaseSharedClientInstance } from "../client/shared.js";
+import type { MatrixSharedClientLease } from "../client/shared.js";
 import type { MatrixClient } from "../sdk.js";
 import { isMatrixStartupAbortError } from "../startup-abort.js";
 import {
@@ -203,33 +202,59 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
   });
   let cleanedUp = false;
   let client: MatrixClient | null = null;
+  let clientLease: MatrixSharedClientLease | null = null;
   let threadBindingManager: { accountId: string; stop: () => void } | null = null;
+  let threadBindingManagerStopped = false;
+  let monitorEvents: { dispose: () => void } | null = null;
   const monitorTaskRunner = createMatrixMonitorTaskRunner({
     logger,
     logVerboseMessage,
   });
   let syncLifecycle: ReturnType<typeof createMatrixMonitorSyncLifecycle> | null = null;
+  const stopThreadBindingManager = () => {
+    if (threadBindingManagerStopped) {
+      return;
+    }
+    threadBindingManagerStopped = true;
+    threadBindingManager?.stop();
+  };
   const cleanup = async (mode: "persist" | "stop" = "persist") => {
     if (cleanedUp) {
       return;
     }
     cleanedUp = true;
     try {
-      client?.stopSyncWithoutPersist();
-      if (client && mode === "persist") {
-        await client.drainPendingDecryptions("matrix monitor shutdown");
-      }
-      if (mode === "persist") {
-        await monitorTaskRunner.waitForIdle();
-      }
-      threadBindingManager?.stop();
-      if (client) {
-        setActiveMatrixClient(null, auth.accountId);
-        await releaseSharedClientInstance(client, mode);
+      setActiveMatrixClient(null, auth.accountId);
+      monitorEvents?.dispose();
+      client?.off("sync.state", onSyncState);
+      if (clientLease) {
+        if (!clientLease.owner && mode === "persist") {
+          // A superseded monitor can borrow the replacement owner's client.
+          // Keep that borrower lease until its already-dispatched work is done.
+          await monitorTaskRunner.waitForIdle();
+        }
+        const releaseResult = await clientLease.release({
+          mode,
+          beforeStop: async ({ forced }) => {
+            client?.stopSyncWithoutPersist();
+            if (mode === "persist" && !forced) {
+              await client?.drainPendingDecryptions("matrix monitor shutdown");
+              await monitorTaskRunner.waitForIdle();
+            }
+            stopThreadBindingManager();
+          },
+        });
+        if (!releaseResult.terminal) {
+          stopThreadBindingManager();
+        }
+      } else {
+        stopThreadBindingManager();
       }
     } finally {
       client?.off("sync.state", onSyncState);
+      monitorEvents?.dispose();
       syncLifecycle?.dispose();
+      stopThreadBindingManager();
       statusController.markStopped();
       setActiveMatrixClient(null, auth.accountId);
     }
@@ -299,12 +324,14 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
   };
 
   try {
-    client = await acquireSharedMatrixClient({
+    clientLease = await acquireSharedMatrixClient({
       cfg,
       auth: authWithLimit,
       startClient: false,
       accountId: auth.accountId,
+      ownership: "owner",
     });
+    client = clientLease.client;
     setActiveMatrixClient(client, auth.accountId);
     const inboundDeduper = createMatrixInboundEventDeduper({
       auth,
@@ -427,7 +454,7 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
       `matrix: thread bindings ready account=${threadBindingManager.accountId} idleMs=${threadBindingIdleTimeoutMs} maxAgeMs=${threadBindingMaxAgeMs}`,
     );
 
-    registerMatrixMonitorEvents({
+    monitorEvents = registerMatrixMonitorEvents({
       cfg,
       client,
       auth,
@@ -458,15 +485,10 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
     // Register Matrix thread bindings before the client starts syncing so threaded
     // commands during startup never observe Matrix as "unavailable".
     logVerboseMessage("matrix: starting client");
-    await resolveSharedMatrixClient({
-      cfg,
-      auth: authWithLimit,
-      accountId: auth.accountId,
-      abortSignal: opts.abortSignal,
-    });
+    await clientLease.ensureStarted({ abortSignal: opts.abortSignal });
     logVerboseMessage("matrix: client started");
 
-    // Shared client is already started via resolveSharedMatrixClient.
+    // Shared client is already started through the monitor's owner lease.
     logger.info(`matrix: logged in as ${auth.userId}`);
     void backfillMatrixAuthDeviceIdAfterStartup({
       auth,

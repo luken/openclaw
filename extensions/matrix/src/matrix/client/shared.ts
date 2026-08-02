@@ -17,32 +17,43 @@ const loadMatrixCreateClientDeps = createLazyRuntimeModule(() =>
 type SharedMatrixClientState = {
   client: MatrixClient;
   key: string;
-  started: boolean;
+  encryption: boolean;
   cryptoReady: boolean;
   startPromise: Promise<void> | null;
   leases: number;
-  releaseMode: MatrixSharedClientReleaseMode;
+  acceptingLeases: boolean;
+  drainWaiters: Set<() => void>;
+  finalizePromise: Promise<void> | null;
 };
 
-type MatrixSharedClientReleaseMode = "stop" | "persist" | "discard";
+export type MatrixSharedClientReleaseMode = "stop" | "persist" | "discard";
 
-const MATRIX_RELEASE_MODE_PRIORITY: Record<MatrixSharedClientReleaseMode, number> = {
-  stop: 0,
-  discard: 1,
-  persist: 2,
+export type MatrixSharedClientLeaseReleaseOptions = {
+  mode?: MatrixSharedClientReleaseMode;
+  beforeStop?: (params: { forced: boolean }) => Promise<void> | void;
 };
 
-function mergeMatrixReleaseMode(
-  current: MatrixSharedClientReleaseMode,
-  requested: MatrixSharedClientReleaseMode,
-): MatrixSharedClientReleaseMode {
-  return MATRIX_RELEASE_MODE_PRIORITY[requested] > MATRIX_RELEASE_MODE_PRIORITY[current]
-    ? requested
-    : current;
-}
+export type MatrixSharedClientLeaseReleaseResult = {
+  terminal: boolean;
+  forced: boolean;
+};
+
+export type MatrixSharedClientLease = {
+  client: MatrixClient;
+  owner: boolean;
+  prepareByDefault: boolean;
+  ensureStarted: (params?: { abortSignal?: AbortSignal }) => Promise<void>;
+  release: (
+    options?: MatrixSharedClientLeaseReleaseOptions,
+  ) => Promise<MatrixSharedClientLeaseReleaseResult>;
+};
+
+const MATRIX_SHARED_CLIENT_DRAIN_TIMEOUT_MS = 2_000;
 
 const sharedClientStates = new Map<string, SharedMatrixClientState>();
 const sharedClientPromises = new Map<string, Promise<SharedMatrixClientState>>();
+const sharedClientStatesByInstance = new WeakMap<MatrixClient, SharedMatrixClientState>();
+const allSharedClientStates = new Set<SharedMatrixClientState>();
 
 function serializeDispatcherPolicyKey(auth: MatrixAuth): string {
   return JSON.stringify(auth.dispatcherPolicy ?? null);
@@ -82,26 +93,98 @@ async function createSharedMatrixClient(params: {
   return {
     client,
     key: buildSharedClientKey(params.auth),
-    started: false,
+    encryption: params.auth.encryption === true,
     cryptoReady: false,
     startPromise: null,
     leases: 0,
-    releaseMode: "stop",
+    acceptingLeases: true,
+    drainWaiters: new Set(),
+    finalizePromise: null,
   };
 }
 
-function findSharedClientStateByInstance(client: MatrixClient): SharedMatrixClientState | null {
-  for (const state of sharedClientStates.values()) {
-    if (state.client === client) {
-      return state;
-    }
+function retireSharedClientState(state: SharedMatrixClientState): void {
+  state.acceptingLeases = false;
+  if (sharedClientStates.get(state.key) === state) {
+    sharedClientStates.delete(state.key);
   }
-  return null;
 }
 
-function deleteSharedClientState(state: SharedMatrixClientState): void {
-  sharedClientStates.delete(state.key);
-  sharedClientPromises.delete(state.key);
+function finishSharedClientState(state: SharedMatrixClientState): void {
+  retireSharedClientState(state);
+  sharedClientStatesByInstance.delete(state.client);
+  allSharedClientStates.delete(state);
+}
+
+function notifySharedClientDrain(state: SharedMatrixClientState): void {
+  if (state.leases !== 0) {
+    return;
+  }
+  for (const resolve of state.drainWaiters) {
+    resolve();
+  }
+  state.drainWaiters.clear();
+}
+
+async function waitForSharedClientDrain(state: SharedMatrixClientState): Promise<boolean> {
+  if (state.leases === 0) {
+    return true;
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let resolveDrain: (() => void) | undefined;
+  const drained = await Promise.race([
+    new Promise<true>((resolve) => {
+      resolveDrain = () => resolve(true);
+      state.drainWaiters.add(resolveDrain);
+    }),
+    new Promise<false>((resolve) => {
+      timeout = setTimeout(() => resolve(false), MATRIX_SHARED_CLIENT_DRAIN_TIMEOUT_MS);
+      timeout.unref?.();
+    }),
+  ]);
+  if (timeout) {
+    clearTimeout(timeout);
+  }
+  if (resolveDrain) {
+    state.drainWaiters.delete(resolveDrain);
+  }
+  return drained;
+}
+
+async function finalizeSharedClientState(params: {
+  state: SharedMatrixClientState;
+  mode: MatrixSharedClientReleaseMode;
+  forced: boolean;
+  beforeStop?: MatrixSharedClientLeaseReleaseOptions["beforeStop"];
+}): Promise<void> {
+  const { state } = params;
+  if (!state.finalizePromise) {
+    state.finalizePromise = (async () => {
+      let beforeStopError: unknown;
+      try {
+        await params.beforeStop?.({ forced: params.forced });
+      } catch (error) {
+        beforeStopError = error;
+      }
+
+      const mode = params.forced || beforeStopError ? "discard" : params.mode;
+      try {
+        if (mode === "persist") {
+          await state.client.stopAndPersist();
+        } else if (mode === "discard") {
+          state.client.stopWithoutPersist();
+        } else {
+          state.client.stop();
+        }
+      } finally {
+        finishSharedClientState(state);
+      }
+      if (beforeStopError) {
+        throw beforeStopError;
+      }
+    })();
+  }
+  await state.finalizePromise;
 }
 
 async function ensureSharedClientStarted(params: {
@@ -113,7 +196,7 @@ async function ensureSharedClientStarted(params: {
     await awaitMatrixStartupWithAbort(startPromise, params.abortSignal);
   };
 
-  if (params.state.started) {
+  if (params.state.client.isSyncing()) {
     return;
   }
   if (params.state.startPromise) {
@@ -138,7 +221,6 @@ async function ensureSharedClientStarted(params: {
     }
 
     await client.start({ abortSignal: params.abortSignal });
-    params.state.started = true;
   })();
   // Keep the shared startup lock until the underlying start fully settles, even
   // if one waiter aborts early while another caller still owns the startup.
@@ -158,11 +240,10 @@ async function resolveSharedMatrixClientState(
     env?: NodeJS.ProcessEnv;
     timeoutMs?: number;
     auth?: MatrixAuth;
-    startClient?: boolean;
     accountId?: string | null;
-    abortSignal?: AbortSignal;
+    forceNew?: boolean;
   } = {},
-): Promise<SharedMatrixClientState> {
+): Promise<{ state: SharedMatrixClientState; created: boolean }> {
   const requestedAccountId = normalizeOptionalAccountId(params.accountId);
   if (params.auth && requestedAccountId && requestedAccountId !== params.auth.accountId) {
     throw new Error(
@@ -192,31 +273,22 @@ async function resolveSharedMatrixClientState(
       accountId: authContext?.accountId,
     }));
   const key = buildSharedClientKey(auth);
-  const shouldStart = params.startClient !== false;
 
   const existingState = sharedClientStates.get(key);
-  if (existingState) {
-    if (shouldStart) {
-      await ensureSharedClientStarted({
-        state: existingState,
-        encryption: auth.encryption,
-        abortSignal: params.abortSignal,
-      });
-    }
-    return existingState;
+  if (existingState && !params.forceNew && existingState.acceptingLeases) {
+    return { state: existingState, created: false };
+  }
+  if (existingState && params.forceNew) {
+    retireSharedClientState(existingState);
   }
 
   const existingPromise = sharedClientPromises.get(key);
   if (existingPromise) {
     const pending = await existingPromise;
-    if (shouldStart) {
-      await ensureSharedClientStarted({
-        state: pending,
-        encryption: auth.encryption,
-        abortSignal: params.abortSignal,
-      });
+    if (!params.forceNew && pending.acceptingLeases) {
+      return { state: pending, created: false };
     }
-    return pending;
+    retireSharedClientState(pending);
   }
 
   const creationPromise = createSharedMatrixClient({
@@ -228,32 +300,71 @@ async function resolveSharedMatrixClientState(
   try {
     const created = await creationPromise;
     sharedClientStates.set(key, created);
-    if (shouldStart) {
-      await ensureSharedClientStarted({
-        state: created,
-        encryption: auth.encryption,
-        abortSignal: params.abortSignal,
-      });
-    }
-    return created;
+    sharedClientStatesByInstance.set(created.client, created);
+    allSharedClientStates.add(created);
+    return { state: created, created: true };
   } finally {
-    sharedClientPromises.delete(key);
+    if (sharedClientPromises.get(key) === creationPromise) {
+      sharedClientPromises.delete(key);
+    }
   }
 }
 
-export async function resolveSharedMatrixClient(
-  params: {
-    cfg?: CoreConfig;
-    env?: NodeJS.ProcessEnv;
-    timeoutMs?: number;
-    auth?: MatrixAuth;
-    startClient?: boolean;
-    accountId?: string | null;
-    abortSignal?: AbortSignal;
-  } = {},
-): Promise<MatrixClient> {
-  const state = await resolveSharedMatrixClientState(params);
-  return state.client;
+function createSharedMatrixClientLease(params: {
+  state: SharedMatrixClientState;
+  owner: boolean;
+  prepareByDefault: boolean;
+}): MatrixSharedClientLease | null {
+  if (!params.state.acceptingLeases) {
+    return null;
+  }
+  params.state.leases += 1;
+  let releasePromise: Promise<MatrixSharedClientLeaseReleaseResult> | null = null;
+
+  return {
+    client: params.state.client,
+    owner: params.owner,
+    prepareByDefault: params.prepareByDefault,
+    ensureStarted: async ({ abortSignal } = {}) => {
+      await ensureSharedClientStarted({
+        state: params.state,
+        encryption: params.state.encryption,
+        abortSignal,
+      });
+    },
+    release: (options = {}) => {
+      if (releasePromise) {
+        return releasePromise;
+      }
+      releasePromise = (async () => {
+        if (params.owner) {
+          retireSharedClientState(params.state);
+        }
+        params.state.leases -= 1;
+        notifySharedClientDrain(params.state);
+
+        if (!params.owner) {
+          return { terminal: false, forced: false };
+        }
+
+        const drained = await waitForSharedClientDrain(params.state);
+        if (!drained) {
+          LogService.warn(
+            "MatrixClientLite",
+            "Matrix shared client drain timed out; forcing terminal shutdown without persistence",
+          );
+        }
+        await finalizeSharedClientState({
+          state: params.state,
+          mode: options.mode ?? "stop",
+          forced: !drained,
+          beforeStop: options.beforeStop,
+        });
+        return { terminal: true, forced: !drained };
+      })();
+      return releasePromise;
+    },
+  };
 }
 
 export async function acquireSharedMatrixClient(
@@ -265,67 +376,61 @@ export async function acquireSharedMatrixClient(
     startClient?: boolean;
     accountId?: string | null;
     abortSignal?: AbortSignal;
+    ownership?: "auto" | "owner";
   } = {},
-): Promise<MatrixClient> {
-  const state = await resolveSharedMatrixClientState(params);
-  state.leases += 1;
-  return state.client;
+): Promise<MatrixSharedClientLease> {
+  let forceNew = params.ownership === "owner";
+  for (;;) {
+    const { state, created } = await resolveSharedMatrixClientState({
+      cfg: params.cfg,
+      env: params.env,
+      timeoutMs: params.timeoutMs,
+      auth: params.auth,
+      accountId: params.accountId,
+      forceNew,
+    });
+    forceNew = false;
+    const lease = createSharedMatrixClientLease({
+      state,
+      owner: created,
+      prepareByDefault: true,
+    });
+    if (!lease) {
+      continue;
+    }
+    if (params.startClient !== false) {
+      try {
+        await lease.ensureStarted({ abortSignal: params.abortSignal });
+      } catch (error) {
+        await lease.release({ mode: "stop" });
+        throw error;
+      }
+    }
+    return lease;
+  }
+}
+
+export function tryAcquireSharedMatrixClientInstance(
+  client: MatrixClient,
+): MatrixSharedClientLease | null {
+  const state = sharedClientStatesByInstance.get(client);
+  if (!state) {
+    return null;
+  }
+  return createSharedMatrixClientLease({
+    state,
+    owner: false,
+    prepareByDefault: false,
+  });
 }
 
 export function stopSharedClient(): void {
-  for (const state of sharedClientStates.values()) {
+  for (const state of allSharedClientStates) {
+    retireSharedClientState(state);
     state.client.stop();
+    state.finalizePromise = Promise.resolve();
+    finishSharedClientState(state);
   }
   sharedClientStates.clear();
   sharedClientPromises.clear();
-}
-
-export function stopSharedClientForAccount(auth: MatrixAuth): void {
-  const key = buildSharedClientKey(auth);
-  const state = sharedClientStates.get(key);
-  if (!state) {
-    return;
-  }
-  state.client.stop();
-  deleteSharedClientState(state);
-}
-
-export function removeSharedClientInstance(client: MatrixClient): boolean {
-  const state = findSharedClientStateByInstance(client);
-  if (!state) {
-    return false;
-  }
-  deleteSharedClientState(state);
-  return true;
-}
-
-export function stopSharedClientInstance(client: MatrixClient): void {
-  if (!removeSharedClientInstance(client)) {
-    return;
-  }
-  client.stop();
-}
-
-export async function releaseSharedClientInstance(
-  client: MatrixClient,
-  mode: MatrixSharedClientReleaseMode = "stop",
-): Promise<boolean> {
-  const state = findSharedClientStateByInstance(client);
-  if (!state) {
-    return false;
-  }
-  state.releaseMode = mergeMatrixReleaseMode(state.releaseMode, mode);
-  state.leases = Math.max(0, state.leases - 1);
-  if (state.leases > 0) {
-    return false;
-  }
-  deleteSharedClientState(state);
-  if (state.releaseMode === "persist") {
-    await client.stopAndPersist();
-  } else if (state.releaseMode === "discard") {
-    client.stopWithoutPersist();
-  } else {
-    client.stop();
-  }
-  return true;
 }

@@ -190,7 +190,7 @@ export function registerMatrixMonitorEvents(params: {
   onRoomMessage: (roomId: string, event: MatrixRawEvent) => void | Promise<void>;
   runDetachedTask?: (label: string, task: () => Promise<void>) => Promise<void>;
   sasNoticeRetryDelayMs?: number;
-}): void {
+}): { dispose: () => void } {
   const {
     cfg,
     client,
@@ -238,7 +238,7 @@ export function registerMatrixMonitorEvents(params: {
       });
   };
 
-  client.on("room.message", (roomId: string, event: MatrixRawEvent) => {
+  const handleRoomMessageEvent = (roomId: string, event: MatrixRawEvent) => {
     if (routeVerificationEvent(roomId, event)) {
       return;
     }
@@ -248,15 +248,15 @@ export function registerMatrixMonitorEvents(params: {
         await onRoomMessage(roomId, event);
       },
     );
-  });
+  };
 
-  client.on("room.encrypted_event", (roomId: string, event: MatrixRawEvent) => {
+  const handleEncryptedEvent = (roomId: string, event: MatrixRawEvent) => {
     const eventId = event?.event_id ?? "unknown";
     const eventType = event?.type ?? "unknown";
     logVerboseMessage(`matrix: encrypted event room=${roomId} type=${eventType} id=${eventId}`);
-  });
+  };
 
-  client.on("room.decrypted_event", (roomId: string, event: MatrixRawEvent) => {
+  const handleDecryptedEvent = (roomId: string, event: MatrixRawEvent) => {
     const eventId = event?.event_id ?? "unknown";
     const eventType = event?.type ?? "unknown";
     logVerboseMessage(`matrix: decrypted event room=${roomId} type=${eventType} id=${eventId}`);
@@ -272,9 +272,9 @@ export function registerMatrixMonitorEvents(params: {
         await onRoomMessage(roomId, event);
       },
     );
-  });
+  };
 
-  client.on("room.failed_decryption", (roomId: string, event: MatrixRawEvent, error: Error) => {
+  const handleFailedDecryption = (roomId: string, event: MatrixRawEvent, error: Error) => {
     void runMonitorTask(
       `failed decryption handler room=${roomId} id=${event.event_id ?? "unknown"}`,
       async () => {
@@ -330,15 +330,15 @@ export function registerMatrixMonitorEvents(params: {
         );
       },
     );
-  });
+  };
 
-  client.on("verification.summary", (summary) => {
+  const handleVerificationSummary = (summary: Parameters<typeof routeVerificationSummary>[0]) => {
     void runMonitorTask("verification summary handler", async () => {
       await routeVerificationSummary(summary);
     });
-  });
+  };
 
-  client.on("room.invite", (roomId: string, event: MatrixRawEvent) => {
+  const handleRoomInvite = (roomId: string, event: MatrixRawEvent) => {
     directTracker?.invalidateRoom(roomId);
     const eventId = event?.event_id ?? "unknown";
     const sender = event?.sender ?? "unknown";
@@ -353,15 +353,15 @@ export function registerMatrixMonitorEvents(params: {
     logVerboseMessage(
       `matrix: invite room=${roomId} sender=${sender} direct=${String(isDirect)} id=${eventId}`,
     );
-  });
+  };
 
-  client.on("room.join", (roomId: string, event: MatrixRawEvent) => {
+  const handleRoomJoin = (roomId: string, event: MatrixRawEvent) => {
     directTracker?.invalidateRoom(roomId);
     const eventId = event?.event_id ?? "unknown";
     logVerboseMessage(`matrix: join room=${roomId} id=${eventId}`);
-  });
+  };
 
-  client.on("room.event", (roomId: string, event: MatrixRawEvent) => {
+  const handleRoomEvent = (roomId: string, event: MatrixRawEvent) => {
     const eventType = event?.type ?? "unknown";
     if (eventType === EventType.RoomMessageEncrypted) {
       logVerboseMessage(
@@ -406,5 +406,32 @@ export function registerMatrixMonitorEvents(params: {
     }
 
     routeVerificationEvent(roomId, event);
-  });
+  };
+
+  client.on("room.message", handleRoomMessageEvent);
+  client.on("room.encrypted_event", handleEncryptedEvent);
+  client.on("room.decrypted_event", handleDecryptedEvent);
+  client.on("room.failed_decryption", handleFailedDecryption);
+  client.on("verification.summary", handleVerificationSummary);
+  client.on("room.invite", handleRoomInvite);
+  client.on("room.join", handleRoomJoin);
+  client.on("room.event", handleRoomEvent);
+
+  let disposed = false;
+  return {
+    dispose: () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      client.off("room.message", handleRoomMessageEvent);
+      client.off("room.encrypted_event", handleEncryptedEvent);
+      client.off("room.decrypted_event", handleDecryptedEvent);
+      client.off("room.failed_decryption", handleFailedDecryption);
+      client.off("verification.summary", handleVerificationSummary);
+      client.off("room.invite", handleRoomInvite);
+      client.off("room.join", handleRoomJoin);
+      client.off("room.event", handleRoomEvent);
+    },
+  };
 }

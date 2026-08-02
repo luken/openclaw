@@ -1697,6 +1697,21 @@ describe("MatrixClient event bridge", () => {
     await restartExpectation;
   });
 
+  it("treats terminal SDK sync state as stopped and can restart the session", async () => {
+    const client = new MatrixClient("https://matrix.example.org", "token");
+
+    await client.start();
+    expect(client.isSyncing()).toBe(true);
+
+    matrixJsClient.emit("sync", "STOPPED", "PREPARED", undefined);
+    expect(client.isSyncing()).toBe(false);
+
+    await client.start();
+
+    expect(matrixJsClient.startClient).toHaveBeenCalledTimes(2);
+    expect(client.isSyncing()).toBe(true);
+  });
+
   it("replays outstanding invite rooms at startup", async () => {
     matrixJsClient.getRooms = vi.fn(() => [
       {

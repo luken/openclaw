@@ -464,8 +464,12 @@ export abstract class MatrixClientBase {
     abortSignal?: AbortSignal;
     readyTimeoutMs?: number;
   }): Promise<void> {
-    if (this.started) {
+    if (this.isSyncing()) {
       return;
+    }
+    this.started = false;
+    if (isMatrixTerminalSyncState(this.currentSyncState)) {
+      this.currentSyncState = null;
     }
 
     throwIfMatrixStartupAborted(opts.abortSignal);
@@ -515,8 +519,12 @@ export abstract class MatrixClientBase {
     return this.syncStore?.hasSavedSyncFromCleanShutdown() === true;
   }
 
+  isSyncing(): boolean {
+    return this.started && !isMatrixTerminalSyncState(this.currentSyncState);
+  }
+
   protected async ensureStartedForCryptoControlPlane(): Promise<void> {
-    if (this.started) {
+    if (this.isSyncing()) {
       return;
     }
     await this.startSyncSession({ bootstrapCrypto: false });

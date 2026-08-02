@@ -2,6 +2,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMockMatrixClient,
+  createMockMatrixClientLease,
   expectExplicitMatrixClientConfig,
   expectOneOffSharedMatrixClient,
   matrixClientResolverMocks,
@@ -12,7 +13,8 @@ const {
   getMatrixRuntimeMock,
   getActiveMatrixClientMock,
   acquireSharedMatrixClientMock,
-  releaseSharedClientInstanceMock,
+  tryAcquireSharedMatrixClientInstanceMock,
+  sharedClientLeaseReleaseMock,
   isBunRuntimeMock,
   resolveMatrixAuthContextMock,
 } = matrixClientResolverMocks;
@@ -30,7 +32,8 @@ vi.mock("../client.js", () => ({
 }));
 
 vi.mock("../client/shared.js", () => ({
-  releaseSharedClientInstance: (...args: unknown[]) => releaseSharedClientInstanceMock(...args),
+  tryAcquireSharedMatrixClientInstance: (...args: [import("../sdk.js").MatrixClient]) =>
+    tryAcquireSharedMatrixClientInstanceMock(...args),
 }));
 
 vi.mock("../../runtime.js", () => ({
@@ -74,8 +77,12 @@ describe("matrix send client helpers", () => {
 
   it("reuses active monitor client when available", async () => {
     const activeClient = createMockMatrixClient();
+    const activeLease = createMockMatrixClientLease(activeClient, {
+      prepareByDefault: false,
+      owner: false,
+    });
     getActiveMatrixClientMock.mockReturnValue(activeClient);
-    acquireSharedMatrixClientMock.mockResolvedValue(activeClient);
+    tryAcquireSharedMatrixClientInstanceMock.mockReturnValue(activeLease);
 
     const result = await withResolvedMatrixSendClient(
       { cfg: TEST_CFG, accountId: "default" },
@@ -86,8 +93,8 @@ describe("matrix send client helpers", () => {
     );
 
     expect(result).toBe("ok");
-    expect(acquireSharedMatrixClientMock).toHaveBeenCalledOnce();
-    expect(releaseSharedClientInstanceMock).toHaveBeenCalledWith(activeClient, "persist");
+    expect(acquireSharedMatrixClientMock).not.toHaveBeenCalled();
+    expect(activeLease.release).toHaveBeenCalledWith({ mode: "persist" });
     expect(activeClient["start"]).toHaveBeenCalledTimes(1);
     expect(activeClient["stop"]).not.toHaveBeenCalled();
     expect(activeClient["stopAndPersist"]).not.toHaveBeenCalled();
@@ -129,7 +136,7 @@ describe("matrix send client helpers", () => {
 
   it("stops shared matrix clients when wrapped sends fail", async () => {
     const sharedClient = createMockMatrixClient();
-    acquireSharedMatrixClientMock.mockResolvedValue(sharedClient);
+    acquireSharedMatrixClientMock.mockResolvedValue(createMockMatrixClientLease(sharedClient));
 
     await expect(
       withResolvedMatrixSendClient({ cfg: TEST_CFG, accountId: "default" }, async () => {
@@ -137,12 +144,12 @@ describe("matrix send client helpers", () => {
       }),
     ).rejects.toThrow("boom");
 
-    expect(releaseSharedClientInstanceMock).toHaveBeenCalledWith(sharedClient, "persist");
+    expect(sharedClientLeaseReleaseMock).toHaveBeenCalledWith({ mode: "persist" });
   });
 
   it("starts one-off clients before outbound sends so encrypted rooms can reuse live crypto state", async () => {
     const sharedClient = createMockMatrixClient();
-    acquireSharedMatrixClientMock.mockResolvedValue(sharedClient);
+    acquireSharedMatrixClientMock.mockResolvedValue(createMockMatrixClientLease(sharedClient));
 
     await withResolvedMatrixSendClient({ cfg: TEST_CFG, accountId: "default" }, async () => "ok");
 
@@ -166,8 +173,12 @@ describe("matrix send client helpers", () => {
 
   it("reuses active monitor clients for control operations without restarting them", async () => {
     const activeClient = createMockMatrixClient();
+    const activeLease = createMockMatrixClientLease(activeClient, {
+      prepareByDefault: false,
+      owner: false,
+    });
     getActiveMatrixClientMock.mockReturnValue(activeClient);
-    acquireSharedMatrixClientMock.mockResolvedValue(activeClient);
+    tryAcquireSharedMatrixClientInstanceMock.mockReturnValue(activeLease);
 
     const result = await withResolvedMatrixControlClient(
       { cfg: TEST_CFG, accountId: "default" },
@@ -178,8 +189,8 @@ describe("matrix send client helpers", () => {
     );
 
     expect(result).toBe("ok");
-    expect(acquireSharedMatrixClientMock).toHaveBeenCalledOnce();
-    expect(releaseSharedClientInstanceMock).toHaveBeenCalledWith(activeClient, "stop");
+    expect(acquireSharedMatrixClientMock).not.toHaveBeenCalled();
+    expect(activeLease.release).toHaveBeenCalledWith({ mode: "stop" });
     expect(activeClient["start"]).not.toHaveBeenCalled();
     expect(activeClient["stop"]).not.toHaveBeenCalled();
     expect(activeClient["stopAndPersist"]).not.toHaveBeenCalled();

@@ -3,6 +3,7 @@ import http from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MatrixMediaSizeLimitError } from "../media-errors.js";
 import { LogService } from "./logger.js";
+import * as transportRuntimeApi from "./transport-runtime-api.js";
 import {
   createMatrixTransport,
   type MatrixTransport,
@@ -688,6 +689,106 @@ describe("MatrixTransport fetch", () => {
     await closePromise;
     expect(closeSettled).toBe(true);
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("forces dispatcher shutdown when an active response never drains", async () => {
+    vi.useFakeTimers();
+    let responseController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const destroy = vi.fn();
+    const close = vi.fn(async () => await new Promise<void>(() => {}));
+    const Agent = vi.fn(function MockAgent() {
+      return { close, destroy };
+    });
+    const runtimeFetch = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              responseController = controller;
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    stubRuntimeFetch(runtimeFetch, Agent);
+    const warnSpy = vi.spyOn(LogService, "warn").mockReturnValue(undefined);
+    const transport = createMatrixTransport({ ssrfPolicy: { allowPrivateNetwork: true } });
+    const request = transport.fetch("http://127.0.0.1:8008/_matrix/client/v3/sync");
+    try {
+      await vi.waitFor(() => expect(runtimeFetch).toHaveBeenCalledOnce());
+
+      let closeSettled = false;
+      const closePromise = transport.close().then(() => {
+        closeSettled = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(closeSettled).toBe(false);
+      expect(destroy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(102);
+      await closePromise;
+      expect(closeSettled).toBe(true);
+      expect(destroy).toHaveBeenCalledOnce();
+      expect(warnSpy).toHaveBeenCalledWith(
+        "MatrixTransport",
+        "Matrix transport drain timed out; forcing active dispatcher shutdown",
+      );
+
+      responseController?.close();
+      await request;
+    } finally {
+      warnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("warns once per consecutive DNS-churn burst without exposing host details", async () => {
+    const addresses = [
+      "203.0.113.1",
+      "203.0.113.2",
+      "203.0.113.2",
+      "203.0.113.3",
+      "203.0.113.4",
+      "203.0.113.5",
+    ];
+    const lookup = vi.fn();
+    const resolverSpy = vi
+      .spyOn(transportRuntimeApi, "resolvePinnedHostnameWithPolicy")
+      .mockImplementation(async (hostname) => ({
+        hostname,
+        addresses: [addresses.shift() ?? "203.0.113.4"],
+        lookup,
+      }));
+    const close = vi.fn(async () => undefined);
+    const Agent = vi.fn(function MockAgent() {
+      return { close };
+    });
+    stubRuntimeFetch(
+      vi.fn(async () => new Response("{}", { status: 200 })),
+      Agent,
+    );
+    const warnSpy = vi.spyOn(LogService, "warn").mockReturnValue(undefined);
+    const transport = createMatrixTransport();
+
+    try {
+      for (let requestIndex = 0; requestIndex < 6; requestIndex += 1) {
+        await transport.fetch("https://matrix.example.org/_matrix/client/v3/sync");
+      }
+
+      expect(Agent).toHaveBeenCalledTimes(5);
+      expect(close).toHaveBeenCalledTimes(4);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        "MatrixTransport",
+        "Repeated DNS address-set changes are preventing pinned dispatcher reuse",
+      );
+      expect(warnSpy.mock.calls.flat().join(" ")).not.toContain("matrix.example.org");
+      expect(warnSpy.mock.calls.flat().join(" ")).not.toContain("203.0.113");
+    } finally {
+      await transport.close();
+      warnSpy.mockRestore();
+      resolverSpy.mockRestore();
+    }
   });
 
   it("bounds retained dispatchers and closes overflow entries after use", async () => {

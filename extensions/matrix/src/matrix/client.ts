@@ -16,9 +16,11 @@ export {
 export { createMatrixClient } from "./client/create-client.js";
 export {
   acquireSharedMatrixClient,
-  removeSharedClientInstance,
-  releaseSharedClientInstance,
-  resolveSharedMatrixClient,
-  stopSharedClientForAccount,
-  stopSharedClientInstance,
+  tryAcquireSharedMatrixClientInstance,
+} from "./client/shared.js";
+export type {
+  MatrixSharedClientLease,
+  MatrixSharedClientLeaseReleaseOptions,
+  MatrixSharedClientLeaseReleaseResult,
+  MatrixSharedClientReleaseMode,
 } from "./client/shared.js";

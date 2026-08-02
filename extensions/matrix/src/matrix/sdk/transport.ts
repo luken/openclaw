@@ -65,6 +65,8 @@ type MatrixRequestParams = {
 };
 
 const MATRIX_TRANSPORT_MAX_RETAINED_DISPATCHERS = 8;
+const MATRIX_TRANSPORT_DRAIN_TIMEOUT_MS = 2_000;
+const MATRIX_TRANSPORT_DNS_RETIREMENT_WARN_THRESHOLD = 3;
 
 export class MatrixTransportClosedError extends Error {
   readonly code = "MATRIX_TRANSPORT_CLOSED";
@@ -89,6 +91,7 @@ function sameAddressSet(left: readonly string[], right: readonly string[]): bool
 class MatrixPinnedDispatcherPool {
   private readonly entries = new Set<MatrixDispatcherEntry>();
   private readonly currentByHostname = new Map<string, MatrixDispatcherEntry>();
+  private readonly dnsRetirementStreakByHostname = new Map<string, number>();
   private closed = false;
   private closedWarningEmitted = false;
   private drainPromise: Promise<void> | null = null;
@@ -131,6 +134,21 @@ class MatrixPinnedDispatcherPool {
     }
   }
 
+  private noteDnsAddressSet(hostname: string, changed: boolean): void {
+    if (!changed) {
+      this.dnsRetirementStreakByHostname.delete(hostname);
+      return;
+    }
+    const streak = (this.dnsRetirementStreakByHostname.get(hostname) ?? 0) + 1;
+    this.dnsRetirementStreakByHostname.set(hostname, streak);
+    if (streak === MATRIX_TRANSPORT_DNS_RETIREMENT_WARN_THRESHOLD) {
+      LogService.warn(
+        "MatrixTransport",
+        "Repeated DNS address-set changes are preventing pinned dispatcher reuse",
+      );
+    }
+  }
+
   private evictRetainedEntry(): void {
     if (this.currentByHostname.size < MATRIX_TRANSPORT_MAX_RETAINED_DISPATCHERS) {
       return;
@@ -142,6 +160,7 @@ class MatrixPinnedDispatcherPool {
       return;
     }
     this.currentByHostname.delete(entry[0]);
+    this.dnsRetirementStreakByHostname.delete(entry[0]);
     this.retire(entry[1], "capacity");
   }
 
@@ -153,8 +172,11 @@ class MatrixPinnedDispatcherPool {
     this.assertOpen();
     const existing = this.currentByHostname.get(params.pinned.hostname);
     if (existing && !sameAddressSet(existing.addresses, params.pinned.addresses)) {
+      this.noteDnsAddressSet(params.pinned.hostname, true);
       this.currentByHostname.delete(params.pinned.hostname);
       this.retire(existing, "dns-change");
+    } else if (existing) {
+      this.noteDnsAddressSet(params.pinned.hostname, false);
     }
     const current = this.currentByHostname.get(params.pinned.hostname);
     const entry =
@@ -206,6 +228,7 @@ class MatrixPinnedDispatcherPool {
       this.resolveDrain = resolve;
     });
     this.currentByHostname.clear();
+    this.dnsRetirementStreakByHostname.clear();
     // Active entries stay alive until their final response-body borrower releases them.
     const idleEntries: MatrixDispatcherEntry[] = [];
     for (const entry of this.entries) {
@@ -218,6 +241,24 @@ class MatrixPinnedDispatcherPool {
       void this.closeEntry(entry);
     }
     this.resolveDrainIfComplete();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([
+      this.drainPromise.then(() => true),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), MATRIX_TRANSPORT_DRAIN_TIMEOUT_MS);
+        timeout.unref?.();
+      }),
+    ]);
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    if (!drained) {
+      LogService.warn(
+        "MatrixTransport",
+        "Matrix transport drain timed out; forcing active dispatcher shutdown",
+      );
+      await Promise.all(Array.from(this.entries, async (entry) => await this.closeEntry(entry)));
+    }
     await this.drainPromise;
   }
 }

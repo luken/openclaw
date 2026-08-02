@@ -4,12 +4,14 @@ import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime"
 import type { CoreConfig } from "../types.js";
 import { getActiveMatrixClient } from "./active-client.js";
 import { isBunRuntime } from "./client/runtime.js";
+import type { MatrixSharedClientLease } from "./client/shared.js";
 import type { MatrixClient } from "./sdk.js";
 
 type ResolvedRuntimeMatrixClient = {
   client: MatrixClient;
   stopOnDone: boolean;
   cleanup?: (mode: ResolvedRuntimeMatrixClientStopMode) => Promise<void>;
+  ensureStarted?: (params?: { abortSignal?: AbortSignal }) => Promise<void>;
 };
 
 type MatrixRuntimeClientReadiness = "none" | "prepared" | "started";
@@ -17,7 +19,10 @@ type ResolvedRuntimeMatrixClientStopMode = "stop" | "persist" | "discard";
 
 type MatrixResolvedClientHook = (
   client: MatrixClient,
-  context: { preparedByDefault: boolean },
+  context: {
+    prepareByDefault: boolean;
+    ensureStarted?: (params?: { abortSignal?: AbortSignal }) => Promise<void>;
+  },
 ) => Promise<void> | void;
 
 const loadMatrixSharedClientRuntimeDeps = createLazyRuntimeModule(() =>
@@ -25,7 +30,7 @@ const loadMatrixSharedClientRuntimeDeps = createLazyRuntimeModule(() =>
     ([clientModule, sharedModule]) => ({
       acquireSharedMatrixClient: clientModule.acquireSharedMatrixClient,
       resolveMatrixAuthContext: clientModule.resolveMatrixAuthContext,
-      releaseSharedClientInstance: sharedModule.releaseSharedClientInstance,
+      tryAcquireSharedMatrixClientInstance: sharedModule.tryAcquireSharedMatrixClientInstance,
     }),
   ),
 );
@@ -33,13 +38,18 @@ const loadMatrixSharedClientRuntimeDeps = createLazyRuntimeModule(() =>
 async function ensureResolvedClientReadiness(params: {
   client: MatrixClient;
   readiness?: MatrixRuntimeClientReadiness;
-  preparedByDefault: boolean;
+  prepareByDefault: boolean;
+  ensureStarted?: (params?: { abortSignal?: AbortSignal }) => Promise<void>;
 }): Promise<void> {
   if (params.readiness === "started") {
-    await params.client.start();
+    if (params.ensureStarted) {
+      await params.ensureStarted();
+    } else {
+      await params.client.start();
+    }
     return;
   }
-  if (params.readiness === "prepared" || (!params.readiness && params.preparedByDefault)) {
+  if (params.readiness === "prepared" || (!params.readiness && params.prepareByDefault)) {
     await params.client.prepareForOneOff();
   }
 }
@@ -59,7 +69,7 @@ async function resolveRuntimeMatrixClient(opts: {
 }): Promise<ResolvedRuntimeMatrixClient> {
   ensureMatrixNodeRuntime();
   if (opts.client) {
-    await opts.onResolved?.(opts.client, { preparedByDefault: false });
+    await opts.onResolved?.(opts.client, { prepareByDefault: false });
     return { client: opts.client, stopOnDone: false };
   }
 
@@ -69,30 +79,40 @@ async function resolveRuntimeMatrixClient(opts: {
     );
   }
   const cfg = requireRuntimeConfig(opts.cfg, "Matrix runtime client") as CoreConfig;
-  const { acquireSharedMatrixClient, releaseSharedClientInstance, resolveMatrixAuthContext } =
-    await loadMatrixSharedClientRuntimeDeps();
+  const {
+    acquireSharedMatrixClient,
+    resolveMatrixAuthContext,
+    tryAcquireSharedMatrixClientInstance,
+  } = await loadMatrixSharedClientRuntimeDeps();
   const authContext = resolveMatrixAuthContext({
     cfg,
     accountId: opts.accountId,
   });
   const active = getActiveMatrixClient(authContext.accountId);
-  const client = await acquireSharedMatrixClient({
-    cfg,
-    timeoutMs: opts.timeoutMs,
-    accountId: authContext.accountId,
-    startClient: false,
-  });
+  const activeLease = active ? tryAcquireSharedMatrixClientInstance(active) : null;
+  const lease: MatrixSharedClientLease =
+    activeLease ??
+    (await acquireSharedMatrixClient({
+      cfg,
+      timeoutMs: opts.timeoutMs,
+      accountId: authContext.accountId,
+      startClient: false,
+    }));
   try {
-    await opts.onResolved?.(client, { preparedByDefault: active !== client });
+    await opts.onResolved?.(lease.client, {
+      prepareByDefault: lease.prepareByDefault,
+      ensureStarted: lease.ensureStarted,
+    });
   } catch (err) {
-    await releaseSharedClientInstance(client, "stop");
+    await lease.release({ mode: "stop" });
     throw err;
   }
   return {
-    client,
+    client: lease.client,
     stopOnDone: true,
+    ensureStarted: lease.ensureStarted,
     cleanup: async (mode) => {
-      await releaseSharedClientInstance(client, mode);
+      await lease.release({ mode });
     },
   };
 }
@@ -113,7 +133,8 @@ export async function resolveRuntimeMatrixClientWithReadiness(opts: {
       await ensureResolvedClientReadiness({
         client,
         readiness: opts.readiness,
-        preparedByDefault: context.preparedByDefault,
+        prepareByDefault: context.prepareByDefault,
+        ensureStarted: context.ensureStarted,
       });
     },
   });
