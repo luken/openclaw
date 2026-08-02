@@ -305,6 +305,10 @@ async function drainStoredChatOutbox(
       }
       syncVisibleChatQueueProjection(host);
       if (item.localCommandName === "reset") {
+        if ((item.sendAttempts ?? 0) > 0 || item.sendRequestStartedAtMs !== undefined) {
+          setCommandState("unconfirmed", UNCONFIRMED_CHAT_SEND_ERROR);
+          return "blocked";
+        }
         const resetTarget = captureChatCommandTarget(host);
         if (!resetTarget) {
           setCommandState("failed", "The Gateway connection changed. Retry the command.");
@@ -316,25 +320,12 @@ async function drainStoredChatOutbox(
           dependencies.setChatError(host, initialAccess.reason);
           return "blocked";
         }
-        const resetText = item.localCommandArgs ? `/reset ${item.localCommandArgs}` : "/reset";
-        const convertResetToMessage = (sendState?: ChatQueueItem["sendState"]) =>
-          updateQueuedMessageForSession(host, outbox.sessionKey, item.id, (entry) => ({
-            ...entry,
-            localCommandArgs: undefined,
-            localCommandName: undefined,
-            refreshSessions: true,
-            text: resetText,
-            ...(sendState ? { sendState } : {}),
-          }));
         const confirmation = await confirmConversationResetForCurrentSession(host, {
           sessionKey: outbox.sessionKey,
           ...(outbox.agentId ? { agentId: outbox.agentId } : {}),
         });
         if (confirmation === "deferred") {
-          const approvedDuringRun =
-            visibleSessionMatches(host, outbox.sessionKey, outbox.agentId) && host.chatRunId;
-          const deferCommand = approvedDuringRun ? convertResetToMessage : setCommandState;
-          deferCommand("waiting-idle");
+          setCommandState("waiting-idle");
           return "blocked";
         }
         if (confirmation === "cancelled") {
@@ -353,7 +344,15 @@ async function drainStoredChatOutbox(
           ...lane.pendingOptions.get(item.id),
           target: resetTarget,
         });
-        if (!convertResetToMessage()) {
+        const result = await dependencies.sendQueuedChatMessage(
+          host,
+          item.id,
+          lane.pendingOptions.get(item.id),
+          outbox.sessionKey,
+        );
+        lane.outcomes.set(item.id, result);
+        lane.pendingOptions.delete(item.id);
+        if (result !== "sent") {
           return "blocked";
         }
         continue;

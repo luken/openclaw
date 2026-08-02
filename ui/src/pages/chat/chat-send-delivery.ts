@@ -186,7 +186,8 @@ async function sendQueuedChatMessage(
 ): Promise<QueuedChatSendResult> {
   const storageMode = options?.storageMode ?? "durable";
   const queued = readQueuedMessageById(host, id);
-  if (!queued || queued.pendingRunId || queued.localCommandName) {
+  const approvedReset = queued?.localCommandName === "reset" && Boolean(options?.target);
+  if (!queued || queued.pendingRunId || (queued.localCommandName && !approvedReset)) {
     return "failed";
   }
   const queueSessionKey = queued.sessionKey ?? queuedSessionKey;
@@ -247,6 +248,13 @@ async function sendQueuedChatMessage(
   if (typeof prepared === "string") {
     setChatError(host, OFFLINE_QUEUE_STORAGE_ERROR);
     return prepared;
+  }
+  if (approvedReset) {
+    prepared = {
+      ...prepared,
+      refreshSessions: true,
+      text: prepared.localCommandArgs ? `/reset ${prepared.localCommandArgs}` : "/reset",
+    };
   }
   const message = prepared.text.trim();
   const attachments = prepared.attachments ?? [];
@@ -717,6 +725,7 @@ async function sendResetSlashCommand(
     previousDraft: options.previousDraft,
     restoreDraft: options.restoreDraft,
     routingSessionKey: host.sessionKey,
+    target: options.target,
   });
 }
 

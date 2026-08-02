@@ -4375,16 +4375,16 @@ describe("handleSendChat", () => {
     expect(approvedReset).toEqual(
       expect.objectContaining({
         id: item.id,
+        localCommandName: "reset",
         sendState: "waiting-idle",
         text: "/reset",
       }),
     );
-    expect(approvedReset).not.toHaveProperty("localCommandName");
 
     host.chatRunId = null;
     await retryReconnectableQueuedChatSends(host);
 
-    expect(confirmConversationReset).toHaveBeenCalledOnce();
+    expect(confirmConversationReset).toHaveBeenCalledTimes(2);
     expect(sendPayloads.map((payload) => payload.message)).toEqual(["/reset"]);
     expect(listStoredChatOutboxes(host)).toStrictEqual([]);
   });
