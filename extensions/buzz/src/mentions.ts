@@ -229,8 +229,9 @@ export function resolveBuzzMessageMentions(params: {
           `Buzz mention "@${name}" does not match a current room member; use nostr:npub... for an explicit identity`,
         );
       }
+      const candidates = matches.map((publicKey) => nip19.npubEncode(publicKey)).join(", ");
       throw new Error(
-        `Buzz mention "@${name}" is ambiguous; use nostr:npub... for an explicit identity`,
+        `Buzz mention "@${name}" is ambiguous; candidates: ${candidates}. Use nostr:npub... for an explicit identity`,
       );
     }
     const publicKey = matches[0];

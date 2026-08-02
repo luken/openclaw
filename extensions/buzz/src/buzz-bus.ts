@@ -47,7 +47,6 @@ export interface BuzzBus {
     text: string;
     threadId?: string;
     replyToId?: string;
-    mentionedPubkeys?: string[];
   }) => Promise<string>;
   sendTyping: (params: {
     channelId: string;
@@ -286,8 +285,13 @@ export async function startBuzzBus(options: {
     publicKey,
     directory,
     refreshDirectory: async () => await directoryRelay?.refreshRooms(options.channelIds),
-    sendText: async ({ channelId, text, threadId, replyToId, mentionedPubkeys }) => {
+    sendText: async ({ channelId, text, threadId, replyToId }) => {
       signal.throwIfAborted();
+      const mentionedPubkeys = resolveBuzzMessageMentions({
+        text,
+        members: directory.mentionMembers(channelId),
+        senderPublicKey: publicKey,
+      });
       const event = buildBuzzTextEvent({
         secretKey,
         channelId,

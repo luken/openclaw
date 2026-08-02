@@ -5,7 +5,6 @@ import { computeBackoff, sleepWithAbort } from "openclaw/plugin-sdk/runtime-env"
 import type { ChannelGatewayContext } from "../runtime-api.js";
 import { sendBuzzTextOneShot, startBuzzBus, type BuzzBus } from "./buzz-bus.js";
 import { handleBuzzInbound } from "./inbound.js";
-import { resolveBuzzMessageMentions } from "./mentions.js";
 import { getBuzzRuntime } from "./runtime.js";
 import { buildBuzzTarget, isConfiguredBuzzChannel, parseBuzzTarget } from "./target.js";
 import {
@@ -242,18 +241,8 @@ export const buzzOutboundAdapter = {
       threadId: threadId == null ? undefined : String(threadId),
       replyToId: replyToId == null ? undefined : String(replyToId),
     };
-    const mentionedPubkeys = bus
-      ? resolveBuzzMessageMentions({
-          text: message,
-          members: bus.directory.mentionMembers(channelId),
-          senderPublicKey: bus.publicKey,
-        })
-      : [];
     const messageId = bus
-      ? await bus.sendText({
-          ...outboundMessage,
-          ...(mentionedPubkeys.length > 0 ? { mentionedPubkeys } : {}),
-        })
+      ? await bus.sendText(outboundMessage)
       : await sendBuzzTextOneShot({
           relayUrl: account.relayUrl,
           privateKey: account.privateKey,

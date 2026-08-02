@@ -343,6 +343,52 @@ describe("Buzz bus lifecycle", () => {
     expect(relayMocks.close).toHaveBeenCalledOnce();
   });
 
+  it("resolves active-bus mentions for proactive sends and agent replies", async () => {
+    relayMocks.auth.mockResolvedValue("ok");
+    relayMocks.profileEvents = [
+      finalizeEvent(
+        {
+          kind: 0,
+          created_at: 1_700_000_000,
+          content: JSON.stringify({ display_name: "Alice" }),
+          tags: [],
+        },
+        Uint8Array.from(Buffer.from(SENDER_PRIVATE_KEY, "hex")),
+      ),
+    ];
+    const bus = await startBuzzBus({
+      accountId: ACCOUNT_ID,
+      relayUrl: "wss://buzz.example.com",
+      privateKey: PRIVATE_KEY,
+      channelIds: [CHANNEL_ID],
+      onMessage: async () => {},
+    });
+
+    await bus.sendText({
+      channelId: CHANNEL_ID,
+      text: "Hello @Alice",
+      threadId: "root-id",
+      replyToId: "parent-id",
+    });
+
+    const event = relayMocks.publish.mock.calls
+      .map(([published]) => published)
+      .find((published) => published.kind === 9);
+    expect(event).toMatchObject({
+      kind: 9,
+      content: "Hello @Alice",
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", "root-id", "", "root"],
+        ["e", "parent-id", "", "reply"],
+        ["p", SENDER_PUBLIC_KEY],
+      ],
+    });
+    expect(relayMocks.connect).toHaveBeenCalledOnce();
+
+    await bus.close();
+  });
+
   it("sends room and thread typing without waiting for a relay acknowledgement", async () => {
     relayMocks.auth.mockResolvedValue("ok");
     const bus = await startBuzzBus({

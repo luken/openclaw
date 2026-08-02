@@ -18,7 +18,6 @@ const gatewayMocks = vi.hoisted(() => ({
     | undefined,
   onMessageError: undefined as ((error: Error) => void) | undefined,
   onFatalError: undefined as ((error: Error) => void) | undefined,
-  currentBus: undefined as BuzzBus | undefined,
   resolveAgentIdentity: vi.fn(),
   resolveAgentRoute: vi.fn(),
   startBuzzBus: vi.fn(),
@@ -64,7 +63,6 @@ describe("Buzz gateway lifecycle", () => {
     gatewayMocks.onMessage = undefined;
     gatewayMocks.onMessageError = undefined;
     gatewayMocks.onFatalError = undefined;
-    gatewayMocks.currentBus = undefined;
     gatewayMocks.busSendText.mockResolvedValue("event-id");
     gatewayMocks.busSendTyping.mockResolvedValue(undefined);
     gatewayMocks.sendBuzzTextOneShot.mockResolvedValue("standalone-event-id");
@@ -97,9 +95,7 @@ describe("Buzz gateway lifecycle", () => {
         gatewayMocks.onMessage = options.onMessage;
         gatewayMocks.onMessageError = options.onMessageError;
         gatewayMocks.onFatalError = options.onFatalError;
-        const bus = createMockBus();
-        gatewayMocks.currentBus = bus;
-        return bus;
+        return createMockBus();
       },
     );
   });
@@ -247,84 +243,6 @@ describe("Buzz gateway lifecycle", () => {
       text: "hello",
       threadId: undefined,
       replyToId: undefined,
-    });
-    expect(gatewayMocks.sendBuzzTextOneShot).not.toHaveBeenCalled();
-
-    abortController.abort();
-    await expect(lifecycle).resolves.toBeUndefined();
-  });
-
-  it("resolves native mentions from the active bus directory without a relay lookup", async () => {
-    const abortController = new AbortController();
-    const memberPublicKey = "b".repeat(64);
-    const cfg = {
-      channels: {
-        buzz: {
-          relayUrl: "wss://buzz.example.com",
-          privateKey: PRIVATE_KEY,
-          groups: { [CHANNEL_ID]: {} },
-        },
-      },
-    } as OpenClawConfig;
-    const account = resolveBuzzAccount({ cfg });
-    const ctx = {
-      cfg,
-      accountId: account.accountId,
-      account,
-      runtime: {},
-      abortSignal: abortController.signal,
-      log: { info: vi.fn(), error: vi.fn() },
-      getStatus: vi.fn(),
-      setStatus: vi.fn(),
-    } as unknown as ChannelGatewayContext<ResolvedBuzzAccount>;
-    const lifecycle = startBuzzGatewayAccount(ctx);
-    await vi.waitFor(() => expect(gatewayMocks.currentBus).toBeDefined());
-    const bus = gatewayMocks.currentBus;
-    if (!bus) {
-      throw new Error("expected active Buzz bus");
-    }
-    bus.directory.replaceMemberships(
-      new Map([
-        [
-          CHANNEL_ID,
-          {
-            roomId: CHANNEL_ID,
-            createdAt: 1_700_000_000,
-            eventId: "1".repeat(64),
-            publisherPublicKey: "f".repeat(64),
-            members: new Set([BOT_PUBLIC_KEY, memberPublicKey]),
-            roles: new Map([
-              [BOT_PUBLIC_KEY, "bot"],
-              [memberPublicKey, "member"],
-            ]),
-          },
-        ],
-      ]),
-    );
-    bus.directory.applyProfileEvent({
-      id: "2".repeat(64),
-      kind: 0,
-      pubkey: memberPublicKey,
-      created_at: 1_700_000_000,
-      content: JSON.stringify({ display_name: "Alice" }),
-      sig: "e".repeat(128),
-      tags: [],
-    });
-
-    await buzzOutboundAdapter.sendText({
-      cfg,
-      to: `buzz:${CHANNEL_ID}`,
-      text: "Hello @Alice",
-      accountId: "default",
-      threadId: "root-id",
-    });
-
-    expect(gatewayMocks.busSendText).toHaveBeenCalledWith({
-      channelId: CHANNEL_ID,
-      text: "Hello @Alice",
-      threadId: "root-id",
-      replyToId: undefined,
-      mentionedPubkeys: [memberPublicKey],
     });
     expect(gatewayMocks.sendBuzzTextOneShot).not.toHaveBeenCalled();
 

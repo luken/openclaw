@@ -43,7 +43,7 @@ describe("Buzz outbound mentions", () => {
         ),
         senderPublicKey: BOT_PUBLIC_KEY,
       }),
-    ).toThrow('Buzz mention "@alice" is ambiguous');
+    ).toThrow(nip19.npubEncode(ALICE_PUBLIC_KEY));
   });
 
   it("accepts explicit NIP-27 identities and ignores presentation-only ambiguous names", () => {
