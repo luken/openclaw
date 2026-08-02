@@ -235,6 +235,9 @@ export function resolveBuzzMessageMentions(params: {
       );
     }
     const publicKey = matches[0];
+    if (!publicKey) {
+      throw new Error("Buzz mention resolution lost its unique room member");
+    }
     if (publicKey !== senderPublicKey && !mentions.includes(publicKey)) {
       if (mentions.length >= BUZZ_MENTION_MAX_COUNT) {
         throw new Error(`Buzz messages support at most ${BUZZ_MENTION_MAX_COUNT} mentions`);
