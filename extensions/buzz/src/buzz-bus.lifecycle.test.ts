@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { finalizeEvent, getPublicKey, type Event, type Filter } from "nostr-tools";
+import { finalizeEvent, getPublicKey, nip19, type Event, type Filter } from "nostr-tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const relayMocks = vi.hoisted(() => ({
@@ -343,6 +343,32 @@ describe("Buzz bus lifecycle", () => {
     expect(relayMocks.close).toHaveBeenCalledOnce();
   });
 
+  it("skips profile discovery for an explicit standalone NIP-27 mention", async () => {
+    relayMocks.auth.mockResolvedValue("ok");
+
+    await sendBuzzTextOneShot({
+      relayUrl: "wss://buzz.example.com",
+      privateKey: PRIVATE_KEY,
+      channelId: CHANNEL_ID,
+      text: `Hello nostr:${nip19.npubEncode(SENDER_PUBLIC_KEY)}`,
+    });
+
+    expect(relayMocks.publish.mock.calls[0]?.[0]).toMatchObject({
+      kind: 9,
+      tags: [
+        ["h", CHANNEL_ID],
+        ["p", SENDER_PUBLIC_KEY],
+      ],
+    });
+    expect(relayMocks.subscriptions.some((entry) => subscriptionIncludesKind(entry, 39002))).toBe(
+      true,
+    );
+    expect(relayMocks.subscriptions.some((entry) => subscriptionIncludesKind(entry, 0))).toBe(
+      false,
+    );
+    expect(relayMocks.close).toHaveBeenCalledOnce();
+  });
+
   it("closes a standalone relay when mention preflight rejects the message", async () => {
     relayMocks.auth.mockResolvedValue("ok");
 
@@ -401,6 +427,31 @@ describe("Buzz bus lifecycle", () => {
       ],
     });
     expect(relayMocks.connect).toHaveBeenCalledOnce();
+
+    await bus.close();
+  });
+
+  it("keeps mention-free active sends off the room roster path", async () => {
+    relayMocks.auth.mockResolvedValue("ok");
+    const bus = await startBuzzBus({
+      accountId: ACCOUNT_ID,
+      relayUrl: "wss://buzz.example.com",
+      privateKey: PRIVATE_KEY,
+      channelIds: [CHANNEL_ID],
+      onMessage: async () => {},
+    });
+    const mentionMembers = vi.spyOn(bus.directory, "mentionMembers");
+
+    await bus.sendText({
+      channelId: CHANNEL_ID,
+      text: "Plain message without a mention",
+    });
+
+    expect(mentionMembers).not.toHaveBeenCalled();
+    expect(relayMocks.publish.mock.calls.at(-1)?.[0]).toMatchObject({
+      kind: 9,
+      tags: [["h", CHANNEL_ID]],
+    });
 
     await bus.close();
   });

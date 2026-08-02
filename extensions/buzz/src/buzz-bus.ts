@@ -6,7 +6,7 @@ import {
   startBuzzDirectoryRelay,
 } from "./directory-relay.js";
 import { BuzzDirectoryState } from "./directory-state.js";
-import { hasBuzzMentionSyntax, resolveBuzzMessageMentions } from "./mentions.js";
+import { inspectBuzzMentionSyntax, resolveBuzzMessageMentions } from "./mentions.js";
 import {
   BUZZ_NORMAL_MESSAGE_KIND,
   BUZZ_TYPING_INDICATOR_KIND,
@@ -157,7 +157,8 @@ export async function sendBuzzTextOneShot(params: {
   replyToId?: string;
 }): Promise<string> {
   const secretKey = decodeBuzzPrivateKey(params.privateKey);
-  if (hasBuzzMentionSyntax(params.text)) {
+  const mentionSyntax = inspectBuzzMentionSyntax(params.text);
+  if (mentionSyntax.hasAtMention || mentionSyntax.hasExplicitIdentity) {
     const signal = AbortSignal.timeout(30_000);
     const publicKey = resolveBuzzPublicKey(params.privateKey);
     const { relay, relayPublicKey } = await connectAuthenticatedBuzzRelaySession({
@@ -180,12 +181,14 @@ export async function sendBuzzTextOneShot(params: {
           signal,
         }),
       );
-      await queryBuzzDirectoryProfiles({
-        relay,
-        state: directory,
-        publicKeys: directory.profilePublicKeys(),
-        signal,
-      });
+      if (mentionSyntax.hasAtMention) {
+        await queryBuzzDirectoryProfiles({
+          relay,
+          state: directory,
+          publicKeys: directory.profilePublicKeys(),
+          signal,
+        });
+      }
       const mentionedPubkeys = resolveBuzzMessageMentions({
         text: params.text,
         members: directory.mentionMembers(params.channelId),
@@ -287,11 +290,15 @@ export async function startBuzzBus(options: {
     refreshDirectory: async () => await directoryRelay?.refreshRooms(options.channelIds),
     sendText: async ({ channelId, text, threadId, replyToId }) => {
       signal.throwIfAborted();
-      const mentionedPubkeys = resolveBuzzMessageMentions({
-        text,
-        members: directory.mentionMembers(channelId),
-        senderPublicKey: publicKey,
-      });
+      const mentionSyntax = inspectBuzzMentionSyntax(text);
+      const mentionedPubkeys =
+        mentionSyntax.hasAtMention || mentionSyntax.hasExplicitIdentity
+          ? resolveBuzzMessageMentions({
+              text,
+              members: directory.mentionMembers(channelId),
+              senderPublicKey: publicKey,
+            })
+          : [];
       const event = buildBuzzTextEvent({
         secretKey,
         channelId,
