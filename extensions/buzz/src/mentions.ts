@@ -8,11 +8,6 @@ export type BuzzMentionMember = {
   displayName?: string;
 };
 
-export type BuzzMentionSyntax = {
-  hasAtMention: boolean;
-  hasExplicitIdentity: boolean;
-};
-
 const HEX_PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/u;
 const NIP_27_PREFIX = "nostr:npub1";
 const NPUB_LENGTH = 63;
@@ -182,12 +177,10 @@ function normalizeMembers(members: readonly BuzzMentionMember[]): Map<string, Bu
   return normalized;
 }
 
-export function hasBuzzMentionSyntax(text: string): boolean {
-  const syntax = inspectBuzzMentionSyntax(text);
-  return syntax.hasAtMention || syntax.hasExplicitIdentity;
-}
-
-export function inspectBuzzMentionSyntax(text: string): BuzzMentionSyntax {
+export function inspectBuzzMentionSyntax(text: string): {
+  hasAtMention: boolean;
+  hasExplicitIdentity: boolean;
+} {
   const stripped = stripCodeRegions(text);
   return {
     hasAtMention: hasAtMentionCandidate(stripped),

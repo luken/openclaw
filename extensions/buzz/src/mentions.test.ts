@@ -1,7 +1,7 @@
 import { nip19 } from "nostr-tools";
 import { describe, expect, it } from "vitest";
 import {
-  hasBuzzMentionSyntax,
+  inspectBuzzMentionSyntax,
   resolveBuzzMessageMentions,
   type BuzzMentionMember,
 } from "./mentions.js";
@@ -27,7 +27,7 @@ describe("Buzz outbound mentions", () => {
   });
 
   it("resolves a known non-ASCII room-member name without treating emails as mentions", () => {
-    expect(hasBuzzMentionSyntax("Hello @Élodie")).toBe(true);
+    expect(inspectBuzzMentionSyntax("Hello @Élodie").hasAtMention).toBe(true);
     expect(
       resolveBuzzMessageMentions({
         text: "Hello @Élodie",
@@ -35,7 +35,10 @@ describe("Buzz outbound mentions", () => {
         senderPublicKey: BOT_PUBLIC_KEY,
       }),
     ).toEqual([ALICE_PUBLIC_KEY]);
-    expect(hasBuzzMentionSyntax("mail user@example.com")).toBe(false);
+    expect(inspectBuzzMentionSyntax("mail user@example.com")).toEqual({
+      hasAtMention: false,
+      hasExplicitIdentity: false,
+    });
   });
 
   it("rejects unknown non-ASCII mention text instead of publishing it without a tag", () => {
