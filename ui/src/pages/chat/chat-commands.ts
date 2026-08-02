@@ -2,6 +2,7 @@
 import type { CommandsListResult } from "../../../../packages/gateway-protocol/src/index.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ModelCatalogEntry, SessionsListResult } from "../../api/types.ts";
+import type { ApplicationGatewaySnapshot } from "../../app/gateway.ts";
 import type { ChatQueueItem } from "../../lib/chat/chat-types.ts";
 import {
   buildFallbackSlashCommands,
@@ -24,6 +25,7 @@ import {
 import { executeSlashCommand } from "./chat-command-executor.ts";
 import { clearChatHistory } from "./chat-history.ts";
 import { enqueuePendingRunMessage } from "./chat-queue.ts";
+import { readChatSessionActionAccess } from "./chat-session-action-access.ts";
 import { handleAbortChat } from "./run-lifecycle.ts";
 import { scheduleChatScroll } from "./scroll.ts";
 
@@ -72,6 +74,31 @@ function setChatCommandError(
 ) {
   host.lastError = error;
   host.chatError = error;
+}
+
+function currentSessionAccessSnapshot(
+  host: ChatCommandHost,
+): Pick<ApplicationGatewaySnapshot, "client" | "hello" | "phase"> {
+  return {
+    client: host.client ?? null,
+    hello: host.hello ?? null,
+    phase: host.connected ? "connected" : "offline",
+  };
+}
+
+function requireChatSessionAction(
+  host: ChatCommandHost,
+  action: "abort" | "compact" | "reset",
+): boolean {
+  const access = readChatSessionActionAccess(
+    currentSessionAccessSnapshot(host),
+    Boolean(host.chatRunId),
+  )[action];
+  if (access.allowed) {
+    return true;
+  }
+  setChatCommandError(host, access.reason);
+  return false;
 }
 
 function remoteSlashCommandCacheKey(agentId: string | undefined): string {
@@ -227,6 +254,9 @@ export async function dispatchChatSlashCommand(
 ): Promise<ChatCommandDispatchResult> {
   switch (name) {
     case "stop":
+      if (!requireChatSessionAction(host, "abort")) {
+        return "failed";
+      }
       await handleAbortChat(host);
       return "completed";
     case "new":
@@ -244,12 +274,20 @@ export async function dispatchChatSlashCommand(
       return "completed";
     }
     case "clear": {
+      if (!requireChatSessionAction(host, "reset")) {
+        return "failed";
+      }
       const confirmation = await confirmConversationResetForCurrentSession(host);
       if (confirmation !== "confirmed") {
         return confirmation;
       }
       return await clearChatHistory(host);
     }
+    case "compact":
+      if (!requireChatSessionAction(host, "compact")) {
+        return "failed";
+      }
+      break;
     case "export-session":
       await host.exportCurrentChat?.();
       return "completed";
@@ -280,6 +318,7 @@ export async function dispatchChatSlashCommand(
   try {
     result = await executeSlashCommand(targetClient, targetSessionKey, name, args, {
       sessions: host.sessions,
+      sessionAccessSnapshot: currentSessionAccessSnapshot(host),
       chatModelCatalog: host.chatModelCatalog,
       sessionsResult: host.sessionsResult,
       sessionsResultAgentId: host.sessionsResultAgentId,

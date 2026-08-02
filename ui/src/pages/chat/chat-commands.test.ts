@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
+import type { GatewayBrowserClient } from "../../api/gateway.ts";
+import type { ApplicationGatewaySnapshot } from "../../app/gateway.ts";
 import {
   SLASH_COMMANDS,
   getSlashCommandCategoryLabel,
@@ -24,6 +26,14 @@ function expectRecordFields(value: unknown, label: string, expected: Record<stri
   for (const [key, expectedValue] of Object.entries(expected)) {
     expect(record[key]).toEqual(expectedValue);
   }
+}
+
+function legacyConnectedSessionAccess() {
+  return {
+    client: { request: vi.fn() } as unknown as GatewayBrowserClient,
+    connected: true,
+    hello: null,
+  };
 }
 
 describe("refreshSlashCommands", () => {
@@ -245,6 +255,39 @@ describe("refreshSlashCommands", () => {
 });
 
 describe("conversation reset confirmation", () => {
+  it.each([
+    ["stop", "chat.abort"],
+    ["clear", "sessions.reset"],
+    ["compact", "sessions.compact"],
+  ] as const)("rejects /%s without its exact operator scope", async (command, method) => {
+    const request = vi.fn();
+    const reset = vi.fn();
+    const client = { request } as unknown as GatewayBrowserClient;
+    const host = {
+      client,
+      connected: true,
+      hello: {
+        auth: { role: "operator", scopes: ["operator.read"] },
+        features: { methods: [method] },
+      } as ApplicationGatewaySnapshot["hello"],
+      sessionKey: "agent:main:current",
+      chatRunId: command === "stop" ? "run-1" : null,
+      sessions: { reset },
+      confirmConversationReset: vi.fn(async () => true),
+      lastError: null,
+      chatError: null,
+    };
+
+    const result = await dispatchChatSlashCommand(host as never, command, "", {
+      sendResetMessage: vi.fn(),
+    });
+
+    expect(result).toBe("failed");
+    expect(request).not.toHaveBeenCalled();
+    expect(reset).not.toHaveBeenCalled();
+    expect(host.lastError).toBeTruthy();
+  });
+
   it("propagates cancelled /new session creation", async () => {
     const result = await dispatchChatSlashCommand(
       { createChatSession: vi.fn(async () => false) } as never,
@@ -323,6 +366,7 @@ describe("conversation reset confirmation", () => {
       const sendResetMessage = vi.fn(async () => {});
       const reset = vi.fn();
       const host = {
+        ...legacyConnectedSessionAccess(),
         chatRunId: null as string | null,
         sessionKey: "agent:main:current",
         confirmConversationReset: vi.fn(async () => await confirmation),
@@ -357,6 +401,7 @@ describe("conversation reset confirmation", () => {
     const reset = vi.fn();
     const result = await dispatchChatSlashCommand(
       {
+        ...legacyConnectedSessionAccess(),
         sessionKey: "agent:main:current",
         confirmConversationReset: vi.fn(async () => false),
         sessions: { reset },

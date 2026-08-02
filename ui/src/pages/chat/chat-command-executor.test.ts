@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
+import type { ApplicationGatewaySnapshot } from "../../app/gateway.ts";
 import { t } from "../../i18n/index.ts";
 import type { SessionCapability, SessionPatch } from "../../lib/sessions/index.ts";
 import {
@@ -45,12 +46,40 @@ function executeSlashCommand(
   sessionKey: string,
   commandName: string,
   args: string,
-  context: Omit<Parameters<typeof executeSlashCommandImpl>[4], "sessions"> = {},
+  context: Omit<
+    Parameters<typeof executeSlashCommandImpl>[4],
+    "sessionAccessSnapshot" | "sessions"
+  > & {
+    sessionAccessSnapshot?: Parameters<typeof executeSlashCommandImpl>[4]["sessionAccessSnapshot"];
+  } = {},
 ) {
+  const {
+    sessionAccessSnapshot = {
+      client,
+      hello: null,
+      phase: "connected",
+    },
+    ...rest
+  } = context;
   return executeSlashCommandImpl(client, sessionKey, commandName, args, {
     sessions: createSessionCapability(client),
-    ...context,
+    ...rest,
+    sessionAccessSnapshot,
   });
+}
+
+function restrictedSnapshot(
+  client: GatewayBrowserClient,
+  methods: string[],
+): Pick<ApplicationGatewaySnapshot, "client" | "hello" | "phase"> {
+  return {
+    client,
+    phase: "connected",
+    hello: {
+      auth: { role: "operator", scopes: ["operator.read"] },
+      features: { methods },
+    } as ApplicationGatewaySnapshot["hello"],
+  };
 }
 
 function row(key: string, overrides?: Partial<GatewaySessionRow>): GatewaySessionRow {
@@ -79,6 +108,31 @@ function expectNoRequestCall(request: ReturnType<typeof vi.fn>, method: string) 
 }
 
 describe("executeSlashCommand directives", () => {
+  it("does not compact a session without operator.admin", async () => {
+    const request = vi.fn();
+    const client = { request } as unknown as GatewayBrowserClient;
+
+    const result = await executeSlashCommand(client, "main", "compact", "", {
+      sessionAccessSnapshot: restrictedSnapshot(client, ["sessions.compact"]),
+    });
+
+    expect(result.failed).toBe(true);
+    expectNoRequestCall(request, "sessions.compact");
+  });
+
+  it("does not patch session settings without operator.admin", async () => {
+    const request = vi.fn();
+    const client = { request } as unknown as GatewayBrowserClient;
+
+    const result = await executeSlashCommand(client, "main", "model", "gpt-5-mini", {
+      sessionAccessSnapshot: restrictedSnapshot(client, ["sessions.patch"]),
+      chatModelCatalog: [{ id: "gpt-5-mini", name: "GPT-5 Mini", provider: "openai" }],
+    });
+
+    expect(result.failed).toBe(true);
+    expectNoRequestCall(request, "sessions.patch");
+  });
+
   it("resolves the legacy main alias for bare /model", async () => {
     const request = vi.fn(async (method: string, _payload?: unknown) => {
       if (method === "sessions.list") {

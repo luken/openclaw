@@ -9,6 +9,7 @@ import { loadSettings } from "../../app/settings.ts";
 import { renderHubTabs } from "../../components/hub-tabs.ts";
 import "../../components/tooltip.ts";
 import { t } from "../../i18n/index.ts";
+import { readSessionMethodAccess } from "../../lib/session-method-access.ts";
 import { resolveSessionKey } from "../../lib/sessions/index.ts";
 import { sessionNavigationTarget } from "../../lib/sessions/route-navigation.ts";
 import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
@@ -88,10 +89,18 @@ async function resolveRevisionSessionKey(
     return originRow.key;
   }
 
-  const createdKey = await context.sessions.create({
+  const createParams = {
     agentId,
     label: truncateUtf16Safe(`Skill Workshop: ${proposal.slug || proposal.key}`, 80),
+  };
+  const createAccess = readSessionMethodAccess(context.gateway.snapshot, {
+    method: "sessions.create",
+    params: createParams,
   });
+  if (!createAccess.allowed) {
+    throw new Error(createAccess.reason);
+  }
+  const createdKey = await context.sessions.create(createParams);
   const sessionKey = resolveSessionKey(createdKey, gatewayHello).trim();
   if (!sessionKey) {
     throw new Error(context.sessions.state.error ?? "Could not prepare a Skill Workshop thread.");

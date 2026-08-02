@@ -10,6 +10,7 @@ import type {
   ModelCatalogEntry,
   SessionsListResult,
 } from "../../api/types.ts";
+import type { ApplicationGatewaySnapshot } from "../../app/gateway.ts";
 import { t } from "../../i18n/index.ts";
 import {
   getSlashCommandCategoryLabel,
@@ -32,6 +33,7 @@ import {
   resolveThinkingLevelInput,
 } from "../../lib/chat/thinking.ts";
 import { formatCompactTokenCount } from "../../lib/format.ts";
+import { readSessionMethodAccess } from "../../lib/session-method-access.ts";
 import { isSessionRunActive } from "../../lib/session-run-state.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import {
@@ -44,10 +46,7 @@ import {
   normalizeOptionalLowercaseString,
 } from "../../lib/string-coerce.ts";
 import { generateUUID } from "../../lib/uuid.ts";
-import {
-  patchChatCommandSessionSettings as patchSession,
-  selectedGlobalScope,
-} from "./chat-settings-patches.ts";
+import { patchChatCommandSessionSettings, selectedGlobalScope } from "./chat-settings-patches.ts";
 
 type SlashCommandResult = {
   /** Markdown-formatted result to display in chat. */
@@ -68,6 +67,7 @@ type SlashCommandResult = {
 
 type SlashCommandContext = {
   sessions: SessionCapability;
+  sessionAccessSnapshot: Pick<ApplicationGatewaySnapshot, "client" | "hello" | "phase">;
   chatModelCatalog?: ModelCatalogEntry[];
   modelCatalog?: ModelCatalogEntry[];
   sessionsResult?: SessionsListResult | null;
@@ -75,6 +75,26 @@ type SlashCommandContext = {
   defaultAgentId?: string;
   agentId?: string;
 };
+
+async function patchSession(
+  context: SlashCommandContext,
+  sessionKey: string,
+  patch: Parameters<typeof patchChatCommandSessionSettings>[2],
+) {
+  const params = {
+    key: sessionKey,
+    ...selectedGlobalScope(sessionKey, context),
+    ...patch,
+  };
+  const access = readSessionMethodAccess(context.sessionAccessSnapshot, {
+    method: "sessions.patch",
+    params,
+  });
+  if (!access.allowed) {
+    throw new Error(access.reason);
+  }
+  return await patchChatCommandSessionSettings(context, sessionKey, patch);
+}
 
 function normalizeVerboseLevel(raw?: string | null): "off" | "on" | "full" | undefined {
   if (!raw) {
@@ -172,10 +192,15 @@ async function executeCompact(
   context: SlashCommandContext,
 ): Promise<SlashCommandResult> {
   try {
-    const result = await context.sessions.compact(
-      sessionKey,
-      selectedGlobalScope(sessionKey, context),
-    );
+    const options = selectedGlobalScope(sessionKey, context);
+    const access = readSessionMethodAccess(context.sessionAccessSnapshot, {
+      method: "sessions.compact",
+      requiredScope: "operator.admin",
+    });
+    if (!access.allowed) {
+      throw new Error(access.reason);
+    }
+    const result = await context.sessions.compact(sessionKey, options);
     if (result?.ok !== true) {
       const reason = typeof result?.reason === "string" ? result.reason.trim() : "";
       return {
