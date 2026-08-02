@@ -197,7 +197,8 @@ describe("chat pane header state", () => {
         client: {} as GatewayBrowserClient,
         sessions,
       });
-      pane.context.gateway.snapshot.hello = hello;
+      pane.context.gateway.snapshot.hello =
+        hello as ApplicationContext["gateway"]["snapshot"]["hello"];
       const session = {
         key: "agent:main:current",
         kind: "direct",
@@ -231,7 +232,7 @@ describe("chat pane header state", () => {
     pane.context.gateway.snapshot.hello = {
       auth: { role: "operator", scopes: ["operator.read"] },
       features: { methods: ["sessions.patch"] },
-    };
+    } as ApplicationContext["gateway"]["snapshot"]["hello"];
     pane.commitHeaderRename();
 
     expect(state.chatError).toBeTruthy();
@@ -248,7 +249,7 @@ describe("chat pane header state", () => {
     pane.context.gateway.snapshot.hello = {
       auth: { role: "operator", scopes: ["operator.read"] },
       features: { methods: ["sessions.patch"] },
-    };
+    } as ApplicationContext["gateway"]["snapshot"]["hello"];
 
     await pane.restoreArchivedSession(state.sessionKey);
 
