@@ -89,4 +89,22 @@ describe("Buzz outbound mentions", () => {
     ).toEqual([]);
     expect(hasBuzzMentionSyntax("mail user@example.com")).toBe(false);
   });
+
+  it("rejects messages above the native mention limit", () => {
+    const mentionedMembers = Array.from({ length: 51 }, (_, index) => {
+      const publicKey = (index + 1).toString(16).padStart(64, "0");
+      return {
+        publicKey,
+        displayName: `Member${index + 1}`,
+      };
+    });
+
+    expect(() =>
+      resolveBuzzMessageMentions({
+        text: mentionedMembers.map((member) => `@${member.displayName}`).join(" "),
+        members: members(...mentionedMembers),
+        senderPublicKey: BOT_PUBLIC_KEY,
+      }),
+    ).toThrow("Buzz messages support at most 50 mentions");
+  });
 });

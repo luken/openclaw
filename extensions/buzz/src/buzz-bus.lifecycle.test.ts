@@ -343,6 +343,22 @@ describe("Buzz bus lifecycle", () => {
     expect(relayMocks.close).toHaveBeenCalledOnce();
   });
 
+  it("closes a standalone relay when mention preflight rejects the message", async () => {
+    relayMocks.auth.mockResolvedValue("ok");
+
+    await expect(
+      sendBuzzTextOneShot({
+        relayUrl: "wss://buzz.example.com",
+        privateKey: PRIVATE_KEY,
+        channelId: CHANNEL_ID,
+        text: "Hello @Missing",
+      }),
+    ).rejects.toThrow('Buzz mention "@missing" does not match a current room member');
+
+    expect(relayMocks.publish).not.toHaveBeenCalled();
+    expect(relayMocks.close).toHaveBeenCalledOnce();
+  });
+
   it("resolves active-bus mentions for proactive sends and agent replies", async () => {
     relayMocks.auth.mockResolvedValue("ok");
     relayMocks.profileEvents = [
