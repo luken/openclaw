@@ -104,7 +104,7 @@ describe("Buzz gateway lifecycle", () => {
     );
   });
 
-  it("invalidates cached room targets when Buzz accepts newer room metadata", async () => {
+  it("invalidates cached room targets after initial discovery and newer room metadata", async () => {
     const abortController = new AbortController();
     const cfg = {
       channels: {
@@ -129,8 +129,9 @@ describe("Buzz gateway lifecycle", () => {
     } as unknown as ChannelGatewayContext<ResolvedBuzzAccount>);
 
     await vi.waitFor(() => expect(gatewayMocks.startBuzzBus).toHaveBeenCalledOnce());
-    gatewayMocks.onRoomDirectoryChanged?.();
     expect(invalidateDirectoryCache).toHaveBeenCalledOnce();
+    gatewayMocks.onRoomDirectoryChanged?.();
+    expect(invalidateDirectoryCache).toHaveBeenCalledTimes(2);
 
     abortController.abort();
     await expect(lifecycle).resolves.toBeUndefined();
@@ -425,6 +426,7 @@ describe("Buzz gateway lifecycle", () => {
       },
     } as OpenClawConfig;
     const account = resolveBuzzAccount({ cfg });
+    const invalidateDirectoryCache = vi.fn();
     const ctx = {
       cfg,
       accountId: account.accountId,
@@ -434,6 +436,7 @@ describe("Buzz gateway lifecycle", () => {
       log: { info: vi.fn(), error: vi.fn() },
       getStatus: vi.fn(),
       setStatus: vi.fn(),
+      invalidateDirectoryCache,
     } as unknown as ChannelGatewayContext<ResolvedBuzzAccount>;
     const lifecycle = startBuzzGatewayAccount(ctx);
 
@@ -458,6 +461,7 @@ describe("Buzz gateway lifecycle", () => {
     await vi.waitFor(() => expect(gatewayMocks.startBuzzBus).toHaveBeenCalledTimes(2), {
       timeout: 3_000,
     });
+    expect(invalidateDirectoryCache).toHaveBeenCalledTimes(2);
     const secondSince = gatewayMocks.startBuzzBus.mock.calls[1]?.[0].since as number;
     expect(secondSince).toBeGreaterThanOrEqual(reconnectStartedAt - 24 * 60 * 60);
     expect(secondSince).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) - 24 * 60 * 60);

@@ -135,6 +135,7 @@ export async function startBuzzGatewayAccount(ctx: ChannelGatewayContext<Resolve
         },
         onRoomDirectoryChanged: ctx.invalidateDirectoryCache,
       });
+      ctx.invalidateDirectoryCache?.();
       connectedAt = Date.now();
       activeBuses.set(account.accountId, bus);
       ctx.setStatus({
