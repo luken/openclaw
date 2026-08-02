@@ -25,6 +25,18 @@ describe("Buzz outbound mentions", () => {
     ).toEqual([ALICE_PUBLIC_KEY]);
   });
 
+  it("resolves a known non-ASCII room-member name without treating emails as mentions", () => {
+    expect(hasBuzzMentionSyntax("Hello @Élodie")).toBe(true);
+    expect(
+      resolveBuzzMessageMentions({
+        text: "Hello @Élodie",
+        members: members({ publicKey: ALICE_PUBLIC_KEY, displayName: "Élodie" }),
+        senderPublicKey: BOT_PUBLIC_KEY,
+      }),
+    ).toEqual([ALICE_PUBLIC_KEY]);
+    expect(hasBuzzMentionSyntax("mail user@example.com")).toBe(false);
+  });
+
   it("rejects unknown and ambiguous names without an explicit identity", () => {
     expect(() =>
       resolveBuzzMessageMentions({
@@ -87,7 +99,6 @@ describe("Buzz outbound mentions", () => {
         senderPublicKey: BOT_PUBLIC_KEY,
       }),
     ).toEqual([]);
-    expect(hasBuzzMentionSyntax("mail user@example.com")).toBe(false);
   });
 
   it("rejects messages above the native mention limit", () => {

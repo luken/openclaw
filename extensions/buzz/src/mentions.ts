@@ -147,6 +147,20 @@ function extractMentionNames(content: string, knownNames: readonly string[]): st
   return names;
 }
 
+function hasAtMentionCandidate(content: string): boolean {
+  for (let index = 0; index < content.length; index += 1) {
+    if (
+      content[index] === "@" &&
+      (index === 0 || isAsciiWhitespace(content[index - 1])) &&
+      index + 1 < content.length &&
+      !isAsciiWhitespace(content[index + 1])
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function normalizeMembers(members: readonly BuzzMentionMember[]): Map<string, BuzzMentionMember> {
   const normalized = new Map<string, BuzzMentionMember>();
   for (const member of members) {
@@ -164,7 +178,7 @@ function normalizeMembers(members: readonly BuzzMentionMember[]): Map<string, Bu
 
 export function hasBuzzMentionSyntax(text: string): boolean {
   const stripped = stripCodeRegions(text);
-  return extractMentionNames(stripped, []).length > 0 || extractNostrPubkeys(stripped).length > 0;
+  return hasAtMentionCandidate(stripped) || extractNostrPubkeys(stripped).length > 0;
 }
 
 export function resolveBuzzMessageMentions(params: {
@@ -174,8 +188,7 @@ export function resolveBuzzMessageMentions(params: {
 }): string[] {
   const stripped = stripCodeRegions(params.text);
   const explicitPublicKeys = extractNostrPubkeys(stripped);
-  const fallbackNames = extractMentionNames(stripped, []);
-  const hasMentionText = fallbackNames.length > 0 || explicitPublicKeys.length > 0;
+  const hasMentionText = hasAtMentionCandidate(stripped) || explicitPublicKeys.length > 0;
   if (!hasMentionText) {
     return [];
   }
