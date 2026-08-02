@@ -9,6 +9,7 @@ import {
 const BOT_PUBLIC_KEY = "a".repeat(64);
 const ALICE_PUBLIC_KEY = "b".repeat(64);
 const SECOND_ALICE_PUBLIC_KEY = "c".repeat(64);
+const BOB_PUBLIC_KEY = "d".repeat(64);
 
 function members(...values: BuzzMentionMember[]): BuzzMentionMember[] {
   return [{ publicKey: BOT_PUBLIC_KEY, displayName: "OpenClaw" }, ...values];
@@ -80,6 +81,51 @@ describe("Buzz outbound mentions", () => {
         senderPublicKey: BOT_PUBLIC_KEY,
       }),
     ).toEqual([ALICE_PUBLIC_KEY]);
+  });
+
+  it("requires explicit identities to resolve the named member they accompany", () => {
+    const explicitBob = nip19.npubEncode(BOB_PUBLIC_KEY);
+    const roomMembers = members(
+      { publicKey: ALICE_PUBLIC_KEY, displayName: "Alice" },
+      { publicKey: SECOND_ALICE_PUBLIC_KEY, displayName: "Alice" },
+      { publicKey: BOB_PUBLIC_KEY, displayName: "Bob" },
+    );
+
+    expect(() =>
+      resolveBuzzMessageMentions({
+        text: `Hello @Missing (nostr:${explicitBob})`,
+        members: roomMembers,
+        senderPublicKey: BOT_PUBLIC_KEY,
+      }),
+    ).toThrow('Buzz mention "@missing" does not match a current room member');
+
+    expect(() =>
+      resolveBuzzMessageMentions({
+        text: `Hello @Alice (nostr:${explicitBob})`,
+        members: roomMembers,
+        senderPublicKey: BOT_PUBLIC_KEY,
+      }),
+    ).toThrow('Buzz mention "@alice" is ambiguous');
+  });
+
+  it("bounds ambiguous-member guidance", () => {
+    const duplicateMembers = Array.from({ length: 8 }, (_, index) => ({
+      publicKey: (index + 1).toString(16).repeat(64),
+      displayName: "Alice",
+    }));
+
+    expect(() =>
+      resolveBuzzMessageMentions({
+        text: "Hello @Alice",
+        members: members(...duplicateMembers),
+        senderPublicKey: BOT_PUBLIC_KEY,
+      }),
+    ).toThrow(
+      `candidates: ${duplicateMembers
+        .slice(0, 5)
+        .map((member) => nip19.npubEncode(member.publicKey))
+        .join(", ")}, and 3 more.`,
+    );
   });
 
   it("rejects explicit identities outside the room and excludes the bot identity", () => {

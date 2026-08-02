@@ -1,6 +1,7 @@
 import { nip19 } from "nostr-tools";
 
 export const BUZZ_MENTION_MAX_COUNT = 50;
+const BUZZ_AMBIGUITY_CANDIDATE_LIMIT = 5;
 
 export type BuzzMentionMember = {
   publicKey: string;
@@ -243,26 +244,30 @@ export function resolveBuzzMessageMentions(params: {
       .map((member) => member.displayName)
       .filter((name): name is string => Boolean(name)),
   );
-  const hasExplicitMentions = explicitPublicKeys.length > 0;
-  if (hasAtMentionCandidate(stripped) && names.length === 0 && !hasExplicitMentions) {
+  if (hasAtMentionCandidate(stripped) && names.length === 0) {
     throw new Error(
       "Buzz mention does not match a current room member; use nostr:npub... for an explicit identity",
     );
   }
   for (const name of names) {
     const matches = namesToPublicKeys.get(name) ?? [];
-    if (matches.length !== 1) {
-      if (hasExplicitMentions) {
+    if (matches.length === 0) {
+      throw new Error(
+        `Buzz mention "@${name}" does not match a current room member; use nostr:npub... for an explicit identity`,
+      );
+    }
+    if (matches.length > 1) {
+      if (matches.some((publicKey) => explicitPublicKeys.includes(publicKey))) {
         continue;
       }
-      if (matches.length === 0) {
-        throw new Error(
-          `Buzz mention "@${name}" does not match a current room member; use nostr:npub... for an explicit identity`,
-        );
-      }
-      const candidates = matches.map((publicKey) => nip19.npubEncode(publicKey)).join(", ");
+      const visibleCandidates = matches
+        .slice(0, BUZZ_AMBIGUITY_CANDIDATE_LIMIT)
+        .map((publicKey) => nip19.npubEncode(publicKey))
+        .join(", ");
+      const hiddenCandidateCount = matches.length - BUZZ_AMBIGUITY_CANDIDATE_LIMIT;
+      const candidateSuffix = hiddenCandidateCount > 0 ? `, and ${hiddenCandidateCount} more` : "";
       throw new Error(
-        `Buzz mention "@${name}" is ambiguous; candidates: ${candidates}. Use nostr:npub... for an explicit identity`,
+        `Buzz mention "@${name}" is ambiguous; candidates: ${visibleCandidates}${candidateSuffix}. Use nostr:npub... for an explicit identity`,
       );
     }
     const publicKey = matches[0];
