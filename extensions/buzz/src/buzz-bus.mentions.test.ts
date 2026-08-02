@@ -14,6 +14,11 @@ const relayMocks = vi.hoisted(() => ({
   membershipEvents: [] as Event[],
   subscriptions: [] as Array<{
     filters: Filter[];
+    handlers: {
+      onevent: (event: Event) => void;
+      oneose?: () => void;
+      onclose?: (reason: string) => void;
+    };
     close: ReturnType<typeof vi.fn>;
   }>,
 }));
@@ -39,10 +44,11 @@ vi.mock("nostr-tools", async (importOriginal) => {
         handlers: {
           onevent: (event: Event) => void;
           oneose?: () => void;
+          onclose?: (reason: string) => void;
         },
       ) {
         const close = vi.fn();
-        relayMocks.subscriptions.push({ filters, close });
+        relayMocks.subscriptions.push({ filters, handlers, close });
         if (filters.some((filter) => filter.kinds?.includes(39002))) {
           for (const event of relayMocks.membershipEvents) {
             handlers.onevent(event);
@@ -247,6 +253,41 @@ describe("Buzz mention delivery", () => {
       ],
     });
     expect(relayMocks.connect).toHaveBeenCalledOnce();
+
+    await bus.close();
+  });
+
+  it("stops mentioning a removed member before the signed roster refresh completes", async () => {
+    const explicitSender = `nostr:${nip19.npubEncode(SENDER_PUBLIC_KEY)}`;
+    const bus = await startBuzzBus({
+      accountId: ACCOUNT_ID,
+      relayUrl: "wss://buzz.example.com",
+      privateKey: PRIVATE_KEY,
+      channelIds: [CHANNEL_ID],
+      onMessage: async () => {},
+    });
+
+    await bus.sendText({ channelId: CHANNEL_ID, text: explicitSender });
+    relayMocks.publish.mockClear();
+    relayMocks.subscriptions
+      .find((entry) => subscriptionIncludesKind(entry, 40_099))
+      ?.handlers.onevent({
+        id: "member-removed-1",
+        kind: 40_099,
+        pubkey: RELAY_PUBLIC_KEY,
+        created_at: 1_700_000_001,
+        content: JSON.stringify({ type: "member_removed", target: SENDER_PUBLIC_KEY }),
+        sig: "e".repeat(128),
+        tags: [["h", CHANNEL_ID]],
+      });
+
+    expect(bus.directory.mentionMembers(CHANNEL_ID)).toEqual([
+      expect.objectContaining({ publicKey: BOT_PUBLIC_KEY }),
+    ]);
+    await expect(bus.sendText({ channelId: CHANNEL_ID, text: explicitSender })).rejects.toThrow(
+      "is not a current room member",
+    );
+    expect(relayMocks.publish).not.toHaveBeenCalled();
 
     await bus.close();
   });
